@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Sanal ortam
+venv/
+env/
+.env/
+
+# Büyük veri dosyaları (yfinance ile yeniden indirilebilir)
+data/market_db.parquet
+data/*.parquet
+data/*.csv
+data/*.pkl
+data/backups/
+
+# Model ağırlıkları (büyük ikili dosyalar)
+data/tree_lstm.pt
+data/replay_buffer.pkl
+*.pt
+*.pkl
+
+# Katalog (çalışma zamanında oluşur)
+data/alpha_catalog.json
+
+# IDE & OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Araştırma PDF'leri
+*.pdf
+
+# Geçici / log
+*.log
+*.tmp
+/tmp/
