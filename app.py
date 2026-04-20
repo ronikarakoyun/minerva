@@ -120,7 +120,9 @@ def get_brain(device: str):
 db = load_data()
 
 # Benchmark (opsiyonel — data/bist100.csv veya .parquet yoksa None)
-_benchmark_series = load_benchmark("data/bist100.parquet") or load_benchmark("data/bist100.csv")
+_benchmark_series = load_benchmark("data/bist100.parquet")
+if _benchmark_series is None:
+    _benchmark_series = load_benchmark("data/bist100.csv")
 
 st.title("🔬 Minerva v3: Evolutionary Alpha Factory")
 st.markdown("AlphaCFG (α-Sem-k + MCTS + Tree-LSTM) × QuantaAlpha (trajectory evolution)")
@@ -1661,8 +1663,9 @@ if not st.session_state.alphas.empty:
                                 fillcolor="rgba(0,204,150,0.07)",
                             ))
                             for _m3w in _m3_hof.windows:
+                                _ts_m3 = pd.Timestamp(_m3w.test_start)
                                 _fig_m3.add_vline(
-                                    x=str(_m3w.test_start)[:10],
+                                    x=_ts_m3.value // 10**6,
                                     line_width=1, line_dash="dot",
                                     line_color="#888888",
                                     annotation_text=f"W{_m3w.window_id}",
@@ -1795,11 +1798,12 @@ if not st.session_state.alphas.empty:
                             ))
                             # Pencere sınırlarını dikey çizgiyle işaretle
                             for _, _wr in _rwf_windows.iterrows():
+                                _ts_vl = pd.Timestamp(_wr["Test Başlangıç"])
                                 _fig_rwf.add_vline(
-                                    x=str(_wr["Test Başlangıç"]),
+                                    x=_ts_vl.value // 10**6,
                                     line_width=1, line_dash="dot",
                                     line_color="#666666",
-                                    annotation_text=str(_wr["Test Başlangıç"])[:7],
+                                    annotation_text=_ts_vl.strftime("%Y-%m"),
                                     annotation_position="top",
                                 )
                             _mode_lbl = "Mod 2 (refit)" if _is_mod2 else "Mod 1 (anchored)"

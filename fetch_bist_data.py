@@ -15,8 +15,8 @@ import os
 
 # ─── Ayarlar ──────────────────────────────────────────────────────────────────
 
-END_DATE   = "2026-04-17"
-START_DATE = (datetime.strptime(END_DATE, "%Y-%m-%d") - timedelta(days=10 * 365)).strftime("%Y-%m-%d")
+END_DATE   = datetime.today().strftime("%Y-%m-%d")
+START_DATE = (datetime.today() - timedelta(days=10 * 365)).strftime("%Y-%m-%d")
 
 OUTPUT_DIR = "data"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -828,7 +828,8 @@ def rename_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 
-MARKET_DB_PATH = os.path.join(OUTPUT_DIR, "market_db.parquet")
+MARKET_DB_PATH  = os.path.join(OUTPUT_DIR, "market_db.parquet")
+BENCHMARK_PATH  = os.path.join(OUTPUT_DIR, "bist100.parquet")
 
 
 def load_existing() -> pd.DataFrame:
@@ -923,6 +924,64 @@ def main():
     print(f"   Tarih aralığı : {combined['Date'].min().date()} → {combined['Date'].max().date()}")
     print(f"   Dosya         : {MARKET_DB_PATH}")
     print(f"{'─'*55}")
+
+    # ── BIST100 benchmark kaydet ───────────────────────────────────────────────
+    _save_benchmark(START_DATE, END_DATE)
+
+
+def _save_benchmark(start: str, end: str) -> None:
+    """
+    XU100.IS (BIST100) verisini çekip data/bist100.parquet olarak kaydeder.
+    Mevcut dosya varsa eksik tarihleri üstüne ekler.
+    """
+    print("\n📊 BIST100 benchmark çekiliyor (XU100.IS)…")
+
+    # Mevcut benchmark varsa yükle
+    existing_bm = None
+    if os.path.exists(BENCHMARK_PATH):
+        try:
+            existing_bm = pd.read_parquet(BENCHMARK_PATH)
+            existing_bm["Date"] = pd.to_datetime(existing_bm["Date"])
+            bm_min = existing_bm["Date"].min().date()
+            bm_max = existing_bm["Date"].max().date()
+            print(f"   Mevcut benchmark: {bm_min} → {bm_max}")
+            # Yalnızca eksik geriye dönük dönem çekilsin
+            _start = start
+            _end = (existing_bm["Date"].min() - timedelta(days=1)).strftime("%Y-%m-%d")
+            if _start >= _end:
+                print("   ✅ Benchmark zaten güncel, çekilecek yeni veri yok.")
+                return
+        except Exception:
+            existing_bm = None
+            _start, _end = start, end
+    else:
+        _start, _end = start, end
+
+    df = fetch_ticker_range("XU100.IS", _start, _end)
+    if df is None or df.empty:
+        print("   ⚠️ XU100.IS verisi çekilemedi — benchmark oluşturulmadı.")
+        return
+
+    bm_new = df.reset_index()[["Date", "Pclose"]].rename(columns={"Pclose": "Close"})
+    bm_new["Date"] = pd.to_datetime(bm_new["Date"])
+
+    if existing_bm is not None:
+        close_col = "Close" if "Close" in existing_bm.columns else "Pclose"
+        existing_bm = existing_bm.rename(columns={close_col: "Close"})[["Date", "Close"]]
+        bm_combined = pd.concat([bm_new, existing_bm], ignore_index=True)
+    else:
+        bm_combined = bm_new
+
+    bm_combined = (
+        bm_combined
+        .drop_duplicates(subset=["Date"])
+        .sort_values("Date")
+        .reset_index(drop=True)
+    )
+    bm_combined.to_parquet(BENCHMARK_PATH, index=False)
+    print(f"   ✅ bist100.parquet kaydedildi: "
+          f"{bm_combined['Date'].min().date()} → {bm_combined['Date'].max().date()} "
+          f"({len(bm_combined):,} gün)")
 
 
 def fetch_ticker_range(symbol: str, start: str, end: str) -> pd.DataFrame | None:

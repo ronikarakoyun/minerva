@@ -52,3 +52,17 @@ Thumbs.db
 *.log
 *.tmp
 /tmp/
+
+# Virtual Environment
+venv/
+env/
+.env
+
+# Data Files (Büyük veri dosyaları Github'a gitmesin)
+data/
+*.parquet
+*.csv
+
+# Python Cache
+__pycache__/
+*.pyc
