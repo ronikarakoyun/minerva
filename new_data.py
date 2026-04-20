@@ -1,216 +1,449 @@
+"""
+Minerva v3 — Master Data Pipeline
+===================================
+Kaynaklar:
+  1. yfinance       — OHLCV (günlük)
+  2. isyatirimhisse — Bilanço: ROE, F/K, PD/DD (çeyreklik → ffill)
+  3. TCMB EVDS      — USD/TRY kuru (günlük, yıllık chunk)
+  4. TEFAS          — Top-5 hisse fonu getirisi (günlük, 3 aylık chunk)
+
+Çıktı: data/market_db_master.parquet
+"""
+
 import os
-import pandas as pd
+import time
+import warnings
+from datetime import datetime, timedelta
+
 import numpy as np
-import yfinance as yf
+import pandas as pd
 import requests
+import yfinance as yf
 import evds
 from tefas import Crawler
-import time
-from datetime import datetime
+from isyatirimhisse import fetch_financials
 
-# ==========================================
-# 1. TEMEL ANALİZ (İŞ YATIRIM) KATMANI
-# ==========================================
-def fetch_fundamentals(ticker, start_year, end_year):
-    """İş Yatırım'dan çeyreklik bilanço kalemlerini (YIL BAZINDA DÖNGÜ İLE) çeker."""
-    print(f"[{ticker}] İş Yatırım Temel Verileri Çekiliyor...")
-    
-    BANKALAR = ["AKBNK", "GARAN", "YKBNK", "ISCTR", "VAKBN", "HALKB", "QNBFB", "TSKB", "ALBRK", "SKBNK"]
-    fin_group = "XI_59" if ticker in BANKALAR else "XI_29"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    all_years_df = []
-    
-    for year in range(start_year, end_year + 1):
-        url = f"https://www.isyatirim.com.tr/_layouts/15/IsYatirim.Website/Common/Data.aspx/MaliTablo?companyCode={ticker}&exchange=TRY&financialGroup={fin_group}&year1={year}&period1=3&year2={year}&period2=12"
-        
-        try:
-            r = requests.get(url, headers=headers, timeout=10)
-            data = r.json()
-            if 'value' not in data or not data['value']:
-                continue
-                
-            df_json = pd.DataFrame(data['value'])
-            
-            # Kırılgan positional index yerine güvenli sütun seçimi (Bug 2 Fix)
-            value_cols = [c for c in df_json.columns if c.startswith('value')]
-            
-            ozk_isim = "Özkaynaklar" if fin_group == "XI_59" else "Ana Ortaklığa Ait Özkaynaklar"
-            kar_isim = "Dönem Net Kar veya Zararı" if fin_group == "XI_59" else "DÖNEM KARI (ZARARI)"
-            sermaye_isim = "Ödenmiş Sermaye"
-            
-            ozk_row = df_json[df_json['itemDescTr'] == ozk_isim]
-            kar_row = df_json[df_json['itemDescTr'] == kar_isim]
-            ser_row = df_json[df_json['itemDescTr'] == sermaye_isim]
-            
-            if ozk_row.empty or kar_row.empty or ser_row.empty:
-                continue
-                
-            ozkaynak = pd.to_numeric(ozk_row[value_cols].iloc[0], errors='coerce').values
-            net_kar = pd.to_numeric(kar_row[value_cols].iloc[0], errors='coerce').values
-            sermaye = pd.to_numeric(ser_row[value_cols].iloc[0], errors='coerce').values
-            
-            n_periods = len(ozkaynak)
-            
-            # İş Yatırım veriyi yeniden eskiye verir, zaman akışı için ters çeviriyoruz
-            ozkaynak = ozkaynak[::-1]
-            net_kar = net_kar[::-1]
-            sermaye = sermaye[::-1]
-            
-            months = [3, 6, 9, 12][:n_periods]
-            dates = [pd.to_datetime(f"{year}-{m:02d}-01") + pd.offsets.MonthEnd(0) for m in months]
-            
-            df_year = pd.DataFrame({
-                "OZKAYNAK": ozkaynak,
-                "NET_KAR": net_kar,
-                "SERMAYE": sermaye
-            }, index=dates)
-            
-            all_years_df.append(df_year)
-            
-        except Exception as e:
-            pass 
-            
-    if not all_years_df:
-        print(f"[{ticker}] Tüm yıllar boş döndü. (Sistemde veri yok)")
-        return pd.DataFrame()
-        
-    df_fund = pd.concat(all_years_df)
-    df_fund.sort_index(inplace=True)
-    
-    df_fund['ROE'] = np.where(df_fund['OZKAYNAK'] > 0, (df_fund['NET_KAR'] / df_fund['OZKAYNAK']) * 100, np.nan)
-    df_fund.index.name = "Date"
-    
-    # 👑 LOOK-AHEAD BİAS KORUMASI (45 Gün Gecikme)
-    df_fund.index = df_fund.index + pd.Timedelta(days=45)
-    
-    return df_fund
+warnings.filterwarnings("ignore")
 
-# ==========================================
-# 2. MAKRO VERİ (TCMB EVDS) KATMANI
-# ==========================================
-def fetch_macro(evds_api_key, start_date, end_date):
-    """TCMB'den Dolar ve Faiz verisini çeker"""
-    print(f"[MAKRO] TCMB EVDS Verileri Çekiliyor ({start_date} - {end_date})...")
-    try:
-        evds_api = evds.evdsAPI(evds_api_key)
-        df_macro = evds_api.get_data(['TP.DK.USD.A', 'TP.POLITEZ.FAIZ'], startdate=start_date, enddate=end_date)
-        
-        df_macro['Tarih'] = pd.to_datetime(df_macro['Tarih'], format="%d-%m-%Y")
-        
-        # Orijinal noktalı isimleri eşleştirme (Bug 1 Fix)
-        df_macro = df_macro.rename(columns={
-            'Tarih': 'Date', 
-            'TP.DK.USD.A': 'USD_TRY', 
-            'TP.POLITEZ.FAIZ': 'TCMB_FAIZ'
-        })
-        df_macro.set_index('Date', inplace=True)
-        
-        available_cols = [col for col in ['USD_TRY', 'TCMB_FAIZ'] if col in df_macro.columns]
-        if 'TCMB_FAIZ' not in available_cols:
-            print("[MAKRO Uyarı] TCMB_FAIZ verisi API'den gelmedi, sadece olan veriler eklenecek.")
-            
-        return df_macro[available_cols]
-    except Exception as e:
-        print(f"EVDS Kritik Hata: {e}")
-        return pd.DataFrame()
+# ─────────────────────────────────────────────
+# YARDIMCI: tarih aralığını N-günlük dilimlere böl
+# ─────────────────────────────────────────────
+def _date_chunks(start: str, end: str, days: int = 365):
+    """'YYYY-MM-DD' aralığını `days` günlük dilimler halinde döndürür."""
+    s = pd.Timestamp(start)
+    e = pd.Timestamp(end)
+    while s <= e:
+        chunk_end = min(s + pd.Timedelta(days=days - 1), e)
+        yield s.strftime("%Y-%m-%d"), chunk_end.strftime("%Y-%m-%d")
+        s = chunk_end + pd.Timedelta(days=1)
 
-# ==========================================
-# 3. KURUMSAL PARA AKIŞI (TEFAS) KATMANI
-# ==========================================
-def fetch_tefas_funds(start_date, end_date):
-    """TEFAS'tan Hisse Senedi Yoğun Fonların fiyatlarını çeker"""
-    print("[TEFAS] Fon Verileri Çekiliyor...")
-    try:
-        crawler = Crawler()
-        funds = ['MAC', 'NNF', 'TKF'] 
-        
-        # Yeni TEFAS API formatı (Bug 4 Fix)
-        df_tefas = crawler.fetch(start=start_date, end=end_date)
-        df_tefas = df_tefas[['date', 'code', 'price']]
-        
-        df_tefas = df_tefas[df_tefas['code'].isin(funds)]
-        df_tefas['date'] = pd.to_datetime(df_tefas['date'])
-        
-        df_tefas_pivot = df_tefas.pivot(index='date', columns='code', values='price')
-        df_tefas_pct = df_tefas_pivot.pct_change()
-        df_tefas_pct.columns = [f"{col}_RET" for col in df_tefas_pct.columns]
-        df_tefas_pct.index.name = "Date"
-        return df_tefas_pct
-    except Exception as e:
-        print(f"TEFAS Hatası: {e}")
-        return pd.DataFrame()
 
-# ==========================================
-# 4. MASTER MERGE (BÜYÜK BİRLEŞTİRME)
-# ==========================================
-def build_master_database(tickers, evds_api_key, start_date="2021-01-01", end_date="2024-01-01"):
-    print(f"🚀 Master Pipeline Başlıyor ({start_date} -> {end_date})...")
-    
-    # Dinamik Tarih Formatları (Bug 3 Fix)
-    _evds_start = datetime.strptime(start_date, "%Y-%m-%d").strftime("%d-%m-%Y")
-    _evds_end   = datetime.strptime(end_date, "%Y-%m-%d").strftime("%d-%m-%Y")
-    
-    start_year = int(start_date[:4])
-    end_year   = int(end_date[:4])
-    
-    df_macro = fetch_macro(evds_api_key, _evds_start, _evds_end) 
-    df_tefas = fetch_tefas_funds(start_date, end_date)
-    
-    master_rows = []
-    
+# ─────────────────────────────────────────────
+# 1. OHLCV — yfinance
+# ─────────────────────────────────────────────
+def fetch_ohlcv(tickers: list, start_date: str, end_date: str) -> pd.DataFrame:
+    print("\n[OHLCV] yfinance'ten fiyat verisi çekiliyor...")
+    frames = []
     for ticker in tickers:
-        print(f"\n---> {ticker} İşleniyor...")
-        
-        df_price = yf.download(ticker + ".IS", start=start_date, end=end_date, progress=False)
+        try:
+            df = yf.download(
+                ticker + ".IS",
+                start=start_date,
+                end=end_date,
+                progress=False,
+                auto_adjust=True,
+            )
+            if df.empty:
+                print(f"  ✗ {ticker}: boş")
+                continue
+
+            # MultiIndex düzelt
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+
+            df = df.reset_index()
+            df["Date"] = pd.to_datetime(df["Date"]).dt.tz_localize(None)
+            df["Ticker"] = ticker
+            frames.append(df[["Date", "Close", "High", "Low", "Open", "Volume", "Ticker"]])
+            print(f"  ✓ {ticker}: {len(df)} satır")
+        except Exception as e:
+            print(f"  ✗ {ticker}: {e}")
+
+    if not frames:
+        raise RuntimeError("Hiçbir hisseden OHLCV verisi gelmedi.")
+    return pd.concat(frames, ignore_index=True)
+
+
+# ─────────────────────────────────────────────
+# 2. BİLANÇO — isyatirimhisse (look-ahead: +45 gün)
+# ─────────────────────────────────────────────
+BANKALAR = {
+    "AKBNK", "GARAN", "YKBNK", "ISCTR", "VAKBN", "HALKB",
+    "QNBFB", "TSKB", "ALBRK", "SKBNK",
+}
+
+def fetch_fundamentals(ticker: str, start_year: int, end_year: int) -> pd.DataFrame:
+    fin_group = "2" if ticker in BANKALAR else "1"
+    try:
+        veri = fetch_financials(
+            symbols=ticker,
+            start_year=str(start_year),
+            end_year=str(end_year),
+            exchange="TRY",
+            financial_group=fin_group,
+        )
+        df = veri[ticker] if isinstance(veri, dict) else veri
+        if df is None or df.empty:
+            return pd.DataFrame()
+
+        # Sabit sütun: FINANCIAL_ITEM_NAME_TR
+        label_col = "FINANCIAL_ITEM_NAME_TR"
+        if label_col not in df.columns:
+            label_col = next(
+                (c for c in df.columns if df[c].dtype == object), df.columns[0]
+            )
+
+        if fin_group == "2":
+            # Bankalar — BDDK/IFRS format (XI_59)
+            ozk_lbl = "XVI. ÖZKAYNAKLAR"
+            kar_lbl = "XXIII. NET DÖNEM KARI/ZARARI"
+            ser_lbl = "16.1 Ödenmiş Sermaye"
+        else:
+            # Sanayi/Hizmet — XI_29 format
+            ozk_lbl = "Ana Ortaklığa Ait Özkaynaklar"
+            kar_lbl = "DÖNEM KARI (ZARARI)"
+            ser_lbl = "Ödenmiş Sermaye"
+
+        def _row(lbl):
+            r = df[df[label_col].str.contains(lbl, case=False, na=False, regex=False)]
+            return r if not r.empty else None
+
+        ozk_row = _row(ozk_lbl)
+        kar_row = _row(kar_lbl)
+        ser_row = _row(ser_lbl)
+        if any(r is None for r in [ozk_row, kar_row, ser_row]):
+            return pd.DataFrame()
+
+        # Dönem sütunları: '2023/3', '2023/6', ...
+        date_cols = [c for c in df.columns if "/" in str(c)]
+
+        def _vals(row):
+            return pd.to_numeric(row[date_cols].iloc[0], errors="coerce").values
+
+        # isyatirimhisse en yeniden en eskiye sıralar → ters çevir
+        ozkaynak = _vals(ozk_row)[::-1]
+        net_kar  = _vals(kar_row)[::-1]
+        sermaye  = _vals(ser_row)[::-1]
+        d_cols   = date_cols[::-1]
+
+        dates = []
+        for d in d_cols:
+            yr, mo = d.split("/")
+            dates.append(
+                pd.to_datetime(f"{yr}-{int(mo):02d}-01") + pd.offsets.MonthEnd(0)
+            )
+
+        fund = pd.DataFrame(
+            {"OZKAYNAK": ozkaynak, "NET_KAR": net_kar, "SERMAYE": sermaye},
+            index=dates,
+        )
+        fund["ROE"] = np.where(
+            fund["OZKAYNAK"] > 0, fund["NET_KAR"] / fund["OZKAYNAK"] * 100, np.nan
+        )
+        fund.index.name = "Date"
+        # 👑 Look-ahead bias koruması: KAP bildirimi ~45 gün gecikir
+        fund.index = fund.index + pd.Timedelta(days=45)
+        return fund
+
+    except Exception as e:
+        print(f"  ✗ [{ticker}] bilanço hatası: {e}")
+        return pd.DataFrame()
+
+
+# ─────────────────────────────────────────────
+# 3. MAKRO — TCMB EVDS (yıllık chunk, 1000 satır limitini aşar)
+# ─────────────────────────────────────────────
+def fetch_macro(evds_api_key: str, start_date: str, end_date: str) -> pd.DataFrame:
+    """
+    Çekilen seriler:
+      Günlük  : USD/TRY, EUR/TRY  (yıllık chunk — 1000 satır limitini aşar)
+      Aylık   : TÜFE yıllık%, TÜFE aylık%, ÜFE  (ffill ile günlüğe dönüşür)
+    """
+    print("\n[EVDS] Makro veriler çekiliyor...")
+    api = evds.evdsAPI(evds_api_key)
+
+    # ── Günlük seriler (yıllık chunk) ──────────────────────────────────────
+    GUNLUK_SERILER = {
+        "TP.DK.USD.A": "USD_TRY",
+        "TP.DK.EUR.A": "EUR_TRY",
+        "TP.APIFON4":  "AOF",       # TCMB Ağırlıklı Ortalama Fonlama Maliyeti
+    }
+    daily_frames = {}
+
+    for seri, kolon in GUNLUK_SERILER.items():
+        chunks = []
+        for chunk_s, chunk_e in _date_chunks(start_date, end_date, days=365):
+            cs_dmy = datetime.strptime(chunk_s, "%Y-%m-%d").strftime("%d-%m-%Y")
+            ce_dmy = datetime.strptime(chunk_e, "%Y-%m-%d").strftime("%d-%m-%Y")
+            try:
+                df = api.get_data([seri], startdate=cs_dmy, enddate=ce_dmy)
+                if df is not None and not df.empty:
+                    chunks.append(df)
+            except Exception:
+                pass
+            time.sleep(0.2)
+
+        if chunks:
+            df_all = pd.concat(chunks, ignore_index=True).drop_duplicates("Tarih")
+            df_all["Tarih"] = pd.to_datetime(df_all["Tarih"], format="%d-%m-%Y")
+            seri_col = seri.replace(".", "_")
+            df_all = df_all.rename(columns={"Tarih": "Date", seri_col: kolon, seri: kolon})
+            df_all = df_all.set_index("Date").sort_index()
+            if kolon in df_all.columns:
+                daily_frames[kolon] = df_all[[kolon]]
+                print(f"  ✓ {kolon:<10}: {len(df_all)} satır (günlük)")
+
+    # ── Aylık seriler (tek chunk yeterli — aylık veri azdır) ───────────────
+    AYLIK_SERILER = {
+        "TP.FG.J0":      "TUFE_YOY",   # TÜFE Yıllık %
+        "TP.FE.OKTG01":  "TUFE_MOM",   # TÜFE Aylık %
+        "TP.FE.OKTG02":  "UFE_MOM",    # ÜFE Aylık %
+    }
+    monthly_frames = {}
+
+    cs_dmy = datetime.strptime(start_date, "%Y-%m-%d").strftime("%d-%m-%Y")
+    ce_dmy = datetime.strptime(end_date,   "%Y-%m-%d").strftime("%d-%m-%Y")
+
+    for seri, kolon in AYLIK_SERILER.items():
+        try:
+            df = api.get_data([seri], startdate=cs_dmy, enddate=ce_dmy)
+            if df is not None and not df.empty:
+                seri_col = seri.replace(".", "_")
+                df = df.rename(columns={"Tarih": "Date", seri_col: kolon, seri: kolon})
+                # Aylık veri "YYYY-M" formatında gelir (örn. "2021-1") → ayın 1'i yap
+                df["Date"] = pd.to_datetime(
+                    df["Date"].astype(str).str.strip() + "-01",
+                    format="%Y-%m-%d",
+                    errors="coerce",
+                )
+                df = df.dropna(subset=["Date"]).set_index("Date").sort_index()
+                if kolon in df.columns:
+                    df[kolon] = pd.to_numeric(df[kolon], errors="coerce")
+                    monthly_frames[kolon] = df[[kolon]]
+                    print(f"  ✓ {kolon:<10}: {len(df)} satır (aylık → ffill)")
+        except Exception as e:
+            print(f"  ✗ {kolon:<10}: {e}")
+        time.sleep(0.2)
+
+    # ── Birleştir ──────────────────────────────────────────────────────────
+    all_frames = list(daily_frames.values()) + list(monthly_frames.values())
+    if not all_frames:
+        print("  [EVDS] Hiçbir seri gelmedi.")
+        return pd.DataFrame()
+
+    result = all_frames[0]
+    for f in all_frames[1:]:
+        result = result.join(f, how="outer")
+
+    result = result.sort_index()
+    print(f"  [EVDS] Toplam: {len(result)} satır × {result.shape[1]} sütun")
+    return result
+
+
+# ─────────────────────────────────────────────
+# 4. TEFAS — Top-5 hisse fonu (3 aylık chunk, ~90 gün limit)
+# ─────────────────────────────────────────────
+def _discover_equity_funds(crawler: Crawler, top_n: int = 5) -> list:
+    """Bugünden 5 iş günü önceki referans günde en büyük hisse fonlarını keşfeder."""
+    ref = pd.bdate_range(end=datetime.today(), periods=5)[0].strftime("%Y-%m-%d")
+    print(f"  [TEFAS] Keşif tarihi: {ref}")
+    try:
+        df = crawler.fetch(start=ref, end=ref)
+        if df is None or df.empty:
+            print("  [TEFAS] Keşif boş döndü.")
+            return []
+
+        df["stock"]      = pd.to_numeric(df.get("stock",      0), errors="coerce").fillna(0)
+        df["market_cap"] = pd.to_numeric(df.get("market_cap", 0), errors="coerce").fillna(0)
+
+        print(f"  [TEFAS] stock≥70: {(df['stock']>=70).sum()} fon  "
+              f"| max={df['stock'].max():.0f}")
+
+        for thr in [70, 50, 30, 0]:
+            sub = df[df["stock"] >= thr].sort_values("market_cap", ascending=False).head(top_n)
+            if not sub.empty:
+                codes = sub["code"].tolist()
+                print(f"  [TEFAS] Eşik≥{thr}% → seçilen: {codes}")
+                return codes
+    except Exception as e:
+        print(f"  [TEFAS] Keşif hatası: {e}")
+    return []
+
+
+def fetch_tefas(start_date: str, end_date: str, top_n: int = 5) -> pd.DataFrame:
+    print("\n[TEFAS] Hisse fonu verileri çekiliyor (3 aylık chunk)...")
+    crawler = Crawler()
+
+    funds = _discover_equity_funds(crawler, top_n=top_n)
+    if not funds:
+        print("  [TEFAS] Fon bulunamadı — atlanıyor.")
+        return pd.DataFrame()
+
+    # TEFAS ~90 gün veriyor; 3 aylık (91 günlük) dilimlerle tüm aralığı tara
+    all_frames = []
+    for fund in funds:
+        fund_chunks = []
+        for chunk_s, chunk_e in _date_chunks(start_date, end_date, days=91):
+            try:
+                df = crawler.fetch(
+                    start=chunk_s,
+                    end=chunk_e,
+                    name=fund,
+                    columns=["date", "code", "price"],
+                )
+                if df is not None and not df.empty:
+                    fund_chunks.append(df[["date", "code", "price"]])
+            except Exception:
+                pass
+            time.sleep(0.2)
+
+        if fund_chunks:
+            combined = pd.concat(fund_chunks, ignore_index=True).drop_duplicates("date")
+            print(f"  ✓ {fund}: {len(combined)} satır")
+            all_frames.append(combined)
+        else:
+            print(f"  ✗ {fund}: veri gelmedi")
+
+    if not all_frames:
+        print("  [TEFAS] Hiçbir fondan veri gelmedi.")
+        return pd.DataFrame()
+
+    df_tefas = pd.concat(all_frames, ignore_index=True)
+    df_tefas["date"] = pd.to_datetime(df_tefas["date"])
+
+    pivot = df_tefas.pivot_table(index="date", columns="code", values="price", aggfunc="last")
+    pct   = pivot.pct_change()
+    pct.columns = [f"{c}_RET" for c in pct.columns]
+    pct.index.name = "Date"
+    print(f"  [TEFAS] Toplam: {len(pct)} satır × {pct.shape[1]} fon sütunu")
+    return pct
+
+
+# ─────────────────────────────────────────────
+# 5. MASTER MERGE
+# ─────────────────────────────────────────────
+def build_master_database(
+    tickers:      list,
+    evds_api_key: str,
+    start_date:   str = "2021-01-01",
+    end_date:     str = None,
+    fund_start_year: int = 2020,
+):
+    if end_date is None:
+        end_date = datetime.today().strftime("%Y-%m-%d")
+
+    print(f"\n{'='*55}")
+    print(f"  Minerva Master Pipeline  {start_date} → {end_date}")
+    print(f"  Hisseler : {tickers}")
+    print(f"{'='*55}")
+
+    end_year = int(end_date[:4])
+
+    # ── Global veriler (bir kez çek) ──────────────────────────
+    df_macro  = fetch_macro(evds_api_key, start_date, end_date)
+    df_tefas  = fetch_tefas(start_date, end_date)
+
+    # ── Hisse bazlı işlem ─────────────────────────────────────
+    print("\n[BİLANÇO + MERGE] Hisseler işleniyor...")
+    master_rows = []
+
+    for ticker in tickers:
+        print(f"\n  → {ticker}")
+
+        # OHLCV tek hisse
+        df_price = yf.download(
+            ticker + ".IS", start=start_date, end=end_date,
+            progress=False, auto_adjust=True,
+        )
         if df_price.empty:
+            print(f"    ✗ Fiyat verisi yok, atlanıyor.")
             continue
-            
         if isinstance(df_price.columns, pd.MultiIndex):
             df_price.columns = df_price.columns.get_level_values(0)
-            
         df_price = df_price.reset_index()
-        df_price['Ticker'] = ticker
-        
-        df_fund = fetch_fundamentals(ticker, start_year, end_year)
-        
-        df_merged = df_price.copy()
-        df_merged.set_index('Date', inplace=True)
-        
-        if not df_macro.empty:
-            df_merged = df_merged.join(df_macro, how='left')
-        if not df_tefas.empty:
-            df_merged = df_merged.join(df_tefas, how='left')
+        df_price["Date"]   = pd.to_datetime(df_price["Date"]).dt.tz_localize(None)
+        df_price["Ticker"] = ticker
+        df_price = df_price[["Date", "Close", "High", "Low", "Open", "Volume", "Ticker"]]
+
+        # Bilanço (start_year bir yıl erken → F/K geçmişi dolsun)
+        print(f"    isyatirimhisse bilanço çekiliyor ({fund_start_year}-{end_year})...")
+        df_fund = fetch_fundamentals(ticker, fund_start_year, end_year)
         if not df_fund.empty:
-            df_merged = df_merged.join(df_fund, how='left')
-        
-        # İleriye Sarma (Look-Ahead engeli)
+            print(f"    ✓ Bilanço: {len(df_fund)} dönem")
+
+        # Merge: Date indexi üzerinden left-join
+        df_merged = df_price.set_index("Date")
+
+        if not df_macro.empty:
+            df_merged = df_merged.join(df_macro, how="left")
+        if not df_tefas.empty:
+            df_merged = df_merged.join(df_tefas, how="left")
+        if not df_fund.empty:
+            df_merged = df_merged.join(df_fund, how="left")
+
+        # Sadece ileriye doldur (look-ahead koruması — asla bfill kullanma)
         df_merged.ffill(inplace=True)
-        
-        # 👑 DİNAMİK ÇARPAN (F/K & PD/DD) HESAPLAYICI
-        if 'SERMAYE' in df_merged.columns and 'OZKAYNAK' in df_merged.columns:
-            df_merged['Piyasa_Degeri'] = df_merged['Close'] * df_merged['SERMAYE']
-            df_merged['PD_DD'] = df_merged['Piyasa_Degeri'] / df_merged['OZKAYNAK']
-            
-            if 'NET_KAR' in df_merged.columns:
-                df_merged['FK'] = np.where(df_merged['NET_KAR'] > 0, 
-                                           df_merged['Piyasa_Degeri'] / df_merged['NET_KAR'], 
-                                           np.nan)
-            
-            df_merged.drop(columns=['Piyasa_Degeri', 'NET_KAR', 'OZKAYNAK', 'SERMAYE'], inplace=True, errors='ignore')
 
-        df_merged = df_merged.reset_index()
-        master_rows.append(df_merged)
-        time.sleep(0.5)
+        # Dinamik çarpanlar
+        if {"SERMAYE", "OZKAYNAK", "NET_KAR"}.issubset(df_merged.columns):
+            piyasa = df_merged["Close"] * df_merged["SERMAYE"]
+            df_merged["PD_DD"] = piyasa / df_merged["OZKAYNAK"]
+            df_merged["FK"]    = np.where(
+                df_merged["NET_KAR"] > 0, piyasa / df_merged["NET_KAR"], np.nan
+            )
+            df_merged.drop(
+                columns=["SERMAYE", "OZKAYNAK", "NET_KAR"], errors="ignore", inplace=True
+            )
 
-    final_db = pd.concat(master_rows, ignore_index=True)
+        master_rows.append(df_merged.reset_index())
+        time.sleep(0.3)
+
+    # ── Kaydet ───────────────────────────────────────────────
+    if not master_rows:
+        print("\n❌ Hiçbir hisse işlenemedi.")
+        return
+
+    final = pd.concat(master_rows, ignore_index=True)
     os.makedirs("data", exist_ok=True)
-    final_db.to_parquet("data/market_db_master.parquet", engine="pyarrow")
-    print("\n✅ Veri Tabanı Başarıyla Oluşturuldu! Kayıt: data/market_db_master.parquet")
+    final.to_parquet("data/market_db_master.parquet", engine="pyarrow")
 
+    print(f"\n{'='*55}")
+    print(f"  ✅ Veri tabanı kaydedildi → data/market_db_master.parquet")
+    print(f"  Toplam satır : {len(final):,}")
+    print(f"  Hisse sayısı : {final['Ticker'].nunique()}")
+    print(f"  Sütunlar     : {list(final.columns)}")
+    print(f"  Tarih aralığı: {final['Date'].min().date()} → {final['Date'].max().date()}")
+
+    # Doluluk raporu
+    print(f"\n  {'Sütun':<18} {'Dolu':>8} {'Oran':>7}")
+    print(f"  {'-'*35}")
+    for col in final.columns:
+        n = final[col].notna().sum()
+        print(f"  {col:<18} {n:>8,} {n/len(final)*100:>6.1f}%")
+    print(f"{'='*55}\n")
+
+
+# ─────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────
 if __name__ == "__main__":
-    # Test Listesine TSKB de eklendi
-    bist_tickers = ["THYAO", "TUPRS", "FROTO", "AKBNK", "TSKB"] 
+    TICKERS  = ["THYAO", "TUPRS", "FROTO", "AKBNK", "TSKB"]
     EVDS_KEY = "TtvxPNsuO2"
-    # Tüm datayı dinamik olarak 2021'den bugüne çekiyoruz
-    today_str = datetime.today().strftime("%Y-%m-%d")
-    build_master_database(bist_tickers, EVDS_KEY, start_date="2021-01-01", end_date=today_str)
+
+    build_master_database(
+        tickers      = TICKERS,
+        evds_api_key = EVDS_KEY,
+        start_date   = "2021-01-01",
+        end_date     = datetime.today().strftime("%Y-%m-%d"),
+        fund_start_year = 2020,
+    )
