@@ -70,8 +70,11 @@ export function Panel({
       <div
         style={{
           flex: 1,
+          minHeight: 0,
           overflow: "auto",
           padding: pad ? "14px 18px" : 0,
+          display: "flex",
+          flexDirection: "column",
         }}
       >
         {children}

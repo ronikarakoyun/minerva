@@ -9,3 +9,9 @@ pyarrow>=12.0
 joblib>=1.3
 yfinance>=0.2
 pytest>=8.0
+
+# API (Faz 0+ — yeni SPA backend)
+fastapi>=0.110
+uvicorn[standard]>=0.27
+websockets>=12.0
+python-multipart>=0.0.9

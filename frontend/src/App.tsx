@@ -4,6 +4,9 @@ import { Routes, Route, Link } from "react-router-dom";
 const AtomsDemo = lazy(() => import("./screens/AtomsDemo"));
 const Catalog = lazy(() => import("./screens/Catalog"));
 const Workbench = lazy(() => import("./screens/Workbench"));
+const LLMTrainer = lazy(() => import("./screens/LLMTrainer"));
+const BestAlphas = lazy(() => import("./screens/BestAlphas"));
+const BacktestStudio = lazy(() => import("./screens/BacktestStudio"));
 
 function Loading() {
   return (
@@ -21,6 +24,9 @@ export default function App() {
         <Route path="/_atoms" element={<AtomsDemo />} />
         <Route path="/catalog" element={<Catalog />} />
         <Route path="/workbench" element={<Workbench />} />
+        <Route path="/llm-trainer" element={<LLMTrainer />} />
+        <Route path="/best-alphas" element={<BestAlphas />} />
+        <Route path="/backtest-studio" element={<BacktestStudio />} />
         <Route path="*" element={<Home />} />
       </Routes>
     </Suspense>
@@ -41,6 +47,9 @@ function Home() {
           ["/_atoms", "Design system showcase"],
           ["/catalog", "Alpha Kataloğu"],
           ["/workbench", "Workbench — Variant C"],
+          ["/llm-trainer", "LLM → Tree-LSTM Eğitici"],
+          ["/best-alphas", "En İyi Alphalar"],
+          ["/backtest-studio", "Backtest Studio — Doğrulama"],
         ].map(([path, label]) => (
           <li key={path} style={{ fontFamily: "var(--mono)", fontSize: 11 }}>
             →{" "}
