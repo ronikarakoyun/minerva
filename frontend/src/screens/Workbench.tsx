@@ -8,7 +8,6 @@ import { Field } from "../components/atoms/Field";
 import { Check } from "../components/atoms/Check";
 import { SegRow } from "../components/atoms/SegRow";
 import { SectionLabel } from "../components/atoms/SectionLabel";
-import { MiniSparkline } from "../components/charts/MiniSparkline";
 import { EquityChart } from "../components/charts/EquityChart";
 import { DrawdownChart } from "../components/charts/DrawdownChart";
 import { HeatmapRow } from "../components/charts/HeatmapRow";
@@ -16,6 +15,7 @@ import { useCatalog } from "../hooks/useCatalog";
 import { useMeta, formatMetaForChrome } from "../hooks/useMeta";
 import { useJob } from "../hooks/useJob";
 import { apiFetch } from "../lib/api";
+import { WINDOW_MAP, windowToLabel } from "../lib/window";
 import { EvaluateResult } from "../types";
 
 // Operator token coloring
@@ -32,18 +32,6 @@ function colorizeFormula(expr: string): React.ReactNode {
   });
 }
 
-function equityCurve(seed = 1, n = 200, drift = 0.0008, vol = 0.012): number[] {
-  let x = seed * 9301 + 49297;
-  const rnd = () => {
-    x = (x * 9301 + 49297) % 233280;
-    return x / 233280 - 0.5;
-  };
-  const out = [1];
-  for (let i = 1; i < n; i++) out.push(out[i - 1] * (1 + drift + rnd() * vol));
-  return out;
-}
-
-// Removed MINING_PARAMS constant — now stateful in component
 
 export default function Workbench() {
   const [searchParams] = useSearchParams();
@@ -97,27 +85,24 @@ export default function Workbench() {
     return true;
   });
 
+  const [launchError, setLaunchError] = useState<string | null>(null);
+
   const handleRun = async () => {
     if (!formula || isLaunching) return;
     setIsLaunching(true);
     setJobId(null);
+    setLaunchError(null);
     try {
       const { job_id } = await apiFetch<{ job_id: string }>("/api/backtest/run", {
         method: "POST",
         body: JSON.stringify({ formula, window: backtestWindow, validations }),
       });
       setJobId(job_id);
-    } catch (e) {
-      console.error(e);
+    } catch (e: any) {
+      setLaunchError(e?.message ?? "Backtest başlatılamadı");
     } finally {
       setIsLaunching(false);
     }
-  };
-
-  const windowLabel: Record<string, "test" | "train" | "all"> = {
-    "TEST · oos": "test",
-    "TRAIN · is": "train",
-    "TAM": "all",
   };
 
   const isRunning = isLaunching || (!!jobId && !jobState.done);
@@ -248,7 +233,7 @@ export default function Workbench() {
                 >
                   <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                     <span style={{ fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--fg-3)" }}>
-                      α-{String(2741 - i * 7).padStart(4, "0")}
+                      α-{String(i + 1).padStart(4, "0")}
                     </span>
                     <Pill mono tone={f.source === "evolution" || f.source === "evo" ? "accent" : "ghost"}>
                       {f.source ?? "—"}
@@ -278,15 +263,8 @@ export default function Workbench() {
                     {f.formula}
                   </code>
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <MiniSparkline
-                      data={equityCurve(sparkSeed, 50, 0.001 + i * 0.0002, 0.012)}
-                      width={140}
-                      height={14}
-                      color={isActive ? "var(--accent)" : "var(--fg-3)"}
-                    />
-                    <span style={{ flex: 1 }} />
                     <span style={{ fontFamily: "var(--mono)", fontSize: 9, color: "var(--fg-3)" }}>
-                      ic {(f.ic ?? 0).toFixed(3)} · len {String(f.formula).split(/\b/).length}
+                      ric {(f.rank_ic ?? 0).toFixed(4)} · adj {(f.adj_ic ?? 0).toFixed(4)} · len {f.formula.length}
                     </span>
                   </div>
                 </div>
@@ -362,10 +340,8 @@ export default function Workbench() {
               <div style={{ marginTop: 6 }}>
                 <SegRow
                   options={["TEST · oos", "TRAIN · is", "TAM"]}
-                  value={
-                    backtestWindow === "test" ? "TEST · oos" : backtestWindow === "train" ? "TRAIN · is" : "TAM"
-                  }
-                  onChange={(v) => setBacktestWindow(windowLabel[v] ?? "test")}
+                  value={windowToLabel(backtestWindow)}
+                  onChange={(v) => setBacktestWindow(WINDOW_MAP[v] ?? "test")}
                 />
               </div>
             </div>
@@ -586,23 +562,20 @@ export default function Workbench() {
                   padding: "6px 8px",
                 }}
               >
-                {["fold-1", "fold-2", "fold-3", "fold-4", "fold-5"].map((lbl, fi) => (
-                  <HeatmapRow
-                    key={lbl}
-                    label={lbl}
-                    width={250}
-                    values={
-                      foldSharpes.length > fi
-                        ? Array.from({ length: 24 }, (_, j) =>
-                            Math.sin((j + fi * 3) / 4) * (foldSharpes[fi] ?? 1.5) +
-                            (Math.random() - 0.5) * 0.3
-                          )
-                        : Array.from({ length: 24 }, (_, j) =>
-                            Math.sin((j + fi * 3) / 4) * 1.5
-                          )
-                    }
-                  />
-                ))}
+                {foldSharpes.length === 0 ? (
+                  <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)", padding: "12px 6px", textAlign: "center" }}>
+                    backtest çalıştırılmadı
+                  </div>
+                ) : (
+                  foldSharpes.map((sharpe, fi) => (
+                    <HeatmapRow
+                      key={`fold-${fi + 1}`}
+                      label={`fold-${fi + 1}`}
+                      width={250}
+                      values={[sharpe]}
+                    />
+                  ))
+                )}
               </div>
             </div>
 
@@ -627,7 +600,7 @@ export default function Workbench() {
               </div>
             </div>
 
-            {jobState.error && !isRunning && (
+            {(jobState.error || launchError) && !isRunning && (
               <div
                 style={{
                   padding: 10,
@@ -639,7 +612,7 @@ export default function Workbench() {
                   color: "var(--neg)",
                 }}
               >
-                ⚠ {jobState.error}
+                ⚠ {jobState.error ?? launchError}
               </div>
             )}
           </div>

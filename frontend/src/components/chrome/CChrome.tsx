@@ -97,41 +97,38 @@ export function CChrome({
         border: "1px solid var(--line-soft)",
       }}
     >
-      {/* Top bar */}
+      {/* Top bar — 3-col grid: left=brand, center=nav, right=actions */}
       <div
-        className="flex items-center gap-3.5 px-3.5"
         style={{
+          display: "grid",
+          gridTemplateColumns: "1fr auto 1fr",
+          alignItems: "center",
+          padding: "0 14px",
           borderBottom: "1px solid var(--line-soft)",
           background: "var(--bg-1)",
         }}
       >
-        <Logo size={13} />
-        <span style={{ height: 14, width: 1, background: "var(--line)" }} />
-        <span
-          style={{
-            fontFamily: "var(--mono)",
-            fontSize: 10.5,
-            color: "var(--fg-1)",
-            letterSpacing: "0.03em",
-          }}
-        >
-          {title}
-        </span>
-        {sub && (
-          <span
-            style={{
-              fontFamily: "var(--mono)",
-              fontSize: 10,
-              color: "var(--fg-3)",
-            }}
-          >
-            · {sub}
+        {/* Left: brand */}
+        <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+          <Logo size={13} />
+          <span style={{ height: 14, width: 1, background: "var(--line)", flexShrink: 0 }} />
+          <span style={{ fontFamily: "var(--mono)", fontSize: 10.5, color: "var(--fg-1)", letterSpacing: "0.03em", whiteSpace: "nowrap" }}>
+            {title}
           </span>
-        )}
-        <span style={{ height: 14, width: 1, background: "var(--line)", margin: "0 4px" }} />
+          {sub && (
+            <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)", whiteSpace: "nowrap" }}>
+              · {sub}
+            </span>
+          )}
+        </div>
+
+        {/* Center: nav — always centered */}
         <NavLinks title={title} />
-        <span style={{ flex: 1 }} />
-        {top}
+
+        {/* Right: page actions */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8, justifyContent: "flex-end" }}>
+          {top}
+        </div>
       </div>
 
       {/* Status sub-bar */}

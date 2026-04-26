@@ -14,6 +14,7 @@ import { Input } from "../components/inputs/Input";
 import { apiFetch } from "../lib/api";
 import { useCatalog } from "../hooks/useCatalog";
 import { useMeta, formatMetaForChrome } from "../hooks/useMeta";
+import { WINDOW_MAP, windowToLabel } from "../lib/window";
 
 const ROLLING_MODES = [
   { t: "Mod 1 — Anchored", d: "formül + sinyal sabit, test kaydır", mode: 1 },
@@ -66,9 +67,13 @@ export default function BacktestStudio() {
   const [ovfLoading, setOvfLoading] = useState(false);
 
   const activeFormula = formula || (top[0]?.formula ?? "");
-  const windowMap: Record<string, "test" | "train" | "all"> = {
-    "TEST · oos": "test", "TRAIN · is": "train", "TAM": "all",
-    "TEST": "test", "TRAIN": "train",
+
+  const handleRunAll = () => {
+    if (!activeFormula) return;
+    handleDSR();
+    handlePBO();
+    handleWF();
+    handleOverfit();
   };
 
   const handleDSR = async () => {
@@ -99,7 +104,7 @@ export default function BacktestStudio() {
     const formulas = ensembleText.split("\n").map((l) => l.trim()).filter(Boolean);
     if (!formulas.length) return;
     setEnsLoading(true);
-    try { setEnsResult(await apiFetch("/api/backtest/ensemble", { method: "POST", body: JSON.stringify({ formulas, window: windowMap[ensWindow] ?? "test", weighting: "equal", max_corr: ensMaxCorr }) })); }
+    try { setEnsResult(await apiFetch("/api/backtest/ensemble", { method: "POST", body: JSON.stringify({ formulas, window: WINDOW_MAP[ensWindow] ?? "test", weighting: "equal", max_corr: ensMaxCorr }) })); }
     catch (e: any) { setEnsResult({ error: e.message }); }
     setEnsLoading(false);
   };
@@ -119,7 +124,7 @@ export default function BacktestStudio() {
       top={
         <>
           <Pill mono tone="accent">{activeFormula ? "α seçili" : "—"}</Pill>
-          <Btn primary disabled={!activeFormula}>▸ Backtesti Koştur</Btn>
+          <Btn variant="primary" onClick={handleRunAll} disabled={!activeFormula}>▸ Tüm Modülleri Koştur</Btn>
         </>
       }
       width="100%"
@@ -151,7 +156,7 @@ export default function BacktestStudio() {
                 <SegRow
                   options={["TEST · oos", "TRAIN · is", "TAM"]}
                   value={window === "test" ? "TEST · oos" : window === "train" ? "TRAIN · is" : "TAM"}
-                  onChange={(v) => setWindow(windowMap[v] ?? "test")}
+                  onChange={(v) => setWindow(WINDOW_MAP[v] ?? "test")}
                 />
               </div>
             </div>
@@ -284,7 +289,7 @@ export default function BacktestStudio() {
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr auto", gap: 12, alignItems: "flex-end" }}>
               <Stepper label="Test pencere uzunluğu" value={wfTestMonths} onChange={setWfTestMonths} min={1} max={24} hint="ay" />
               <Stepper label="Min train" value={wfMinTrain} onChange={setWfMinTrain} min={6} max={60} hint="ay" />
-              <Select label="Veri penceresi" value={window === "test" ? "TEST" : window === "train" ? "TRAIN" : "TAM"} options={["TEST", "TRAIN", "TAM"]} onChange={(v) => setWindow(windowMap[v] ?? "test")} />
+              <Select label="Veri penceresi" value={window === "test" ? "TEST" : window === "train" ? "TRAIN" : "TAM"} options={["TEST", "TRAIN", "TAM"]} onChange={(v) => setWindow(WINDOW_MAP[v] ?? "test")} />
               <Btn mono small onClick={handleWF} disabled={wfLoading}>▸ {wfLoading ? "…" : "Rolling WF Koştur"}</Btn>
             </div>
             {wfResult && (

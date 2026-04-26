@@ -79,10 +79,13 @@ export default function LLMTrainer() {
     setParseLoading(false);
   };
 
+  const [trainLaunchError, setTrainLaunchError] = useState<string | null>(null);
+
   const handleTrain = async () => {
     if (isLaunching) return;
     setIsLaunching(true);
     setTrainJobId(null);
+    setTrainLaunchError(null);
     try {
       const { job_id } = await apiFetch<{ job_id: string }>("/api/training/run", {
         method: "POST",
@@ -90,7 +93,7 @@ export default function LLMTrainer() {
       });
       setTrainJobId(job_id);
     } catch (e: any) {
-      console.error(e);
+      setTrainLaunchError(e?.message ?? "Eğitim başlatılamadı");
     } finally {
       setIsLaunching(false);
     }
@@ -125,7 +128,7 @@ export default function LLMTrainer() {
               ? `Eğitiliyor… ${Math.round(trainJob.progress * 100)}%`
               : "↺ Tree-LSTM Eğit"}
           </Btn>
-          <Btn primary onClick={handleParse} disabled={parseLoading}>
+          <Btn variant="primary" onClick={handleParse} disabled={parseLoading}>
             {parseLoading ? "Hesaplanıyor…" : "▸ Parse & Değerlendir"}
           </Btn>
         </>
@@ -167,7 +170,7 @@ export default function LLMTrainer() {
               <Check label="LLM formüller için WF-Fitness hesapla" hint="daha yavaş · fold=5" checked={wfFitness} onChange={setWfFitness} />
               <span style={{ flex: 1 }} />
               <Btn variant="ghost" onClick={() => setText(SAMPLE)}>Örnekleri yükle</Btn>
-              <Btn primary onClick={handleParse} disabled={parseLoading}>
+              <Btn variant="primary" onClick={handleParse} disabled={parseLoading}>
                 {parseLoading ? "…" : "▸ Parse & Değerlendir"}
               </Btn>
             </div>
@@ -257,9 +260,9 @@ export default function LLMTrainer() {
               </div>
             )}
 
-            {trainJob.error && (
+            {(trainJob.error || trainLaunchError) && (
               <div style={{ marginTop: 10, fontFamily: "var(--mono)", fontSize: 10, color: "var(--neg)" }}>
-                ⚠ {trainJob.error}
+                ⚠ {trainJob.error ?? trainLaunchError}
               </div>
             )}
 
@@ -287,13 +290,13 @@ export default function LLMTrainer() {
                   <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)", marginBottom: 4 }}>
                     LOSS · {lossCurve.length > 0 ? `son ${lossCurve.length} epoch` : "henüz eğitilmedi"}
                   </div>
-                  <MiniSparkline
-                    data={lossCurve.length > 0 ? lossCurve : Array.from({ length: 24 }, (_, i) => 0.4 * Math.exp(-i / 8) + 0.04)}
-                    width={300}
-                    height={36}
-                    color={lossCurve.length > 0 ? "var(--accent)" : "var(--fg-3)"}
-                    fill
-                  />
+                  {lossCurve.length > 0 ? (
+                    <MiniSparkline data={lossCurve} width={300} height={36} color="var(--accent)" fill />
+                  ) : (
+                    <div style={{ height: 36, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)" }}>
+                      eğitim çalıştırılınca dolar
+                    </div>
+                  )}
                 </Box>
               </div>
             </div>

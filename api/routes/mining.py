@@ -7,6 +7,7 @@ Sonuçlar data/alpha_catalog.json'a kaydedilir.
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
@@ -14,7 +15,10 @@ from pydantic import BaseModel
 
 from api.deps import get_cfg, get_market_db, get_split_date
 from api.jobs import registry
+from engine.alpha_catalog import save_alpha
+from engine.mining_runner import MiningConfig, run_mining_window
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
@@ -64,8 +68,6 @@ async def start_mining(req: MiningRequest) -> MiningStartResponse:
 
             await job.emit_log(f"Veri: {len(db_slice):,} satır — {req.num_gen} nesil koşulacak")
 
-            from engine.mining_runner import MiningConfig, run_mining_window
-
             mcfg = MiningConfig(
                 num_gen=req.num_gen,
                 max_K=req.max_K,
@@ -106,10 +108,8 @@ async def start_mining(req: MiningRequest) -> MiningStartResponse:
             await job.emit_log(f"Mining tamamlandı — {len(results)} formül kabul edildi")
 
             if req.save_to_catalog and results:
-                from engine.alpha_catalog import save_alpha
-                from engine.alpha_cfg import AlphaCFG
                 saved = 0
-                _cfg = get_cfg()
+                failed = 0
                 for r in results:
                     try:
                         save_alpha(
@@ -126,9 +126,13 @@ async def start_mining(req: MiningRequest) -> MiningStartResponse:
                             wf_fitness=r.fitness,
                         )
                         saved += 1
-                    except Exception:
-                        pass
-                await job.emit_log(f"{saved} formül kataloğa kaydedildi")
+                    except Exception as save_exc:
+                        failed += 1
+                        logger.warning("save_alpha failed for %s: %s", r.formula[:40], save_exc)
+                await job.emit_log(
+                    f"{saved} formül kataloğa kaydedildi"
+                    + (f" · {failed} kayıt hatalı" if failed else "")
+                )
 
             summary = [
                 {

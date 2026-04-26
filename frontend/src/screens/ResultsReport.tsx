@@ -40,18 +40,21 @@ export default function ResultsReport() {
   const { data: metaData } = useMeta();
   const chromeMeta = formatMetaForChrome(metaData);
 
+  const [launchError, setLaunchError] = useState<string | null>(null);
+
   const handleRun = async () => {
     if (!selectedFormula || isLaunching) return;
     setIsLaunching(true);
     setJobId(null);
+    setLaunchError(null);
     try {
       const { job_id } = await apiFetch<{ job_id: string }>("/api/backtest/run", {
         method: "POST",
         body: JSON.stringify({ formula: selectedFormula, window: window_ }),
       });
       setJobId(job_id);
-    } catch (e) {
-      console.error(e);
+    } catch (e: any) {
+      setLaunchError(e?.message ?? "Backtest başlatılamadı");
     } finally {
       setIsLaunching(false);
     }
@@ -153,10 +156,10 @@ export default function ResultsReport() {
           )}
 
           {/* Error state */}
-          {jobState.error && (
+          {(jobState.error || launchError) && (
             <Box p={12}>
               <span style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--neg)" }}>
-                ⚠ {jobState.error}
+                ⚠ {jobState.error ?? launchError}
               </span>
             </Box>
           )}
