@@ -3,9 +3,12 @@ import { CChrome } from "../components/chrome/CChrome";
 import { Panel } from "../components/chrome/Panel";
 import { Btn } from "../components/atoms/Btn";
 import { useCatalog } from "../hooks/useCatalog";
+import { useMeta, formatMetaForChrome } from "../hooks/useMeta";
 
 export default function BestAlphas() {
   const { data: records = [], exportCsv } = useCatalog();
+  const { data: metaData } = useMeta();
+  const chromeMeta = formatMetaForChrome(metaData);
   const navigate = useNavigate();
 
   const top = [...records]
@@ -16,6 +19,7 @@ export default function BestAlphas() {
     <CChrome
       title="en iyi evrimleşmiş alphalar"
       sub="top 10 · sort: rankic ↓"
+      meta={chromeMeta}
       top={
         <>
           <Btn variant="ghost" onClick={() => navigate("/catalog")}>◳ Kataloğa dön</Btn>

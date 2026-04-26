@@ -11,6 +11,7 @@ import { EquityChart } from "../components/charts/EquityChart";
 import { DrawdownChart } from "../components/charts/DrawdownChart";
 import { HeatmapRow } from "../components/charts/HeatmapRow";
 import { useCatalog } from "../hooks/useCatalog";
+import { useMeta, formatMetaForChrome } from "../hooks/useMeta";
 import { useJob } from "../hooks/useJob";
 import { apiFetch } from "../lib/api";
 
@@ -36,6 +37,8 @@ export default function ResultsReport() {
 
   const isRunning = isLaunching || (!!jobId && !jobState.done);
   const result = jobState.result as Record<string, any> | null;
+  const { data: metaData } = useMeta();
+  const chromeMeta = formatMetaForChrome(metaData);
 
   const handleRun = async () => {
     if (!selectedFormula || isLaunching) return;
@@ -88,6 +91,7 @@ export default function ResultsReport() {
       <CChrome
         title="results report"
         sub="alpha performans raporu · PDF export"
+        meta={chromeMeta}
         top={
           <div className="no-print" style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <Btn variant="ghost" onClick={() => navigate("/workbench")}>← Workbench</Btn>

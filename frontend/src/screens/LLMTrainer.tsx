@@ -12,6 +12,7 @@ import { Stepper } from "../components/inputs/Stepper";
 import { MiniSparkline } from "../components/charts/MiniSparkline";
 import { apiFetch } from "../lib/api";
 import { useJob } from "../hooks/useJob";
+import { useMeta, formatMetaForChrome } from "../hooks/useMeta";
 
 const SAMPLE = `Rank(Mul(Sub(Pclose, Popen), Vlot), 20)
 CSRank(Delta(Pvwap, 30))
@@ -106,11 +107,14 @@ export default function LLMTrainer() {
   const bufferSize = bufStatus?.size ?? 0;
   const lastLoss = trainResult?.last_loss;
   const epochsDone = trainResult?.epochs_done;
+  const { data: metaData } = useMeta();
+  const chromeMeta = formatMetaForChrome(metaData);
 
   return (
     <CChrome
       title="llm → tree-lstm"
       sub="harici LLM formüllerini öğret"
+      meta={chromeMeta}
       top={
         <>
           <Pill mono tone={bufferSize > 0 ? "pos" : "ghost"}>

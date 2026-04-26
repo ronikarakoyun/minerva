@@ -7,12 +7,15 @@ import { Pill } from "../components/atoms/Pill";
 import { Check } from "../components/atoms/Check";
 import { Select } from "../components/inputs/Select";
 import { useCatalog } from "../hooks/useCatalog";
+import { useMeta, formatMetaForChrome } from "../hooks/useMeta";
 import { CatalogRecord } from "../types";
 
 type SortKey = "ic" | "rank_ic" | "adj_ic" | "sharpe";
 
 export default function Catalog() {
   const { data: records = [], isLoading, refetch, deleteOne, deleteAll, exportCsv } = useCatalog();
+  const { data: metaData } = useMeta();
+  const chromeMeta = formatMetaForChrome(metaData);
   const navigate = useNavigate();
 
   const [overfitFilter, setOverfitFilter] = useState("Tümü");
@@ -71,6 +74,7 @@ export default function Catalog() {
     <CChrome
       title="alpha kataloğu"
       sub={`${records.length} kayıt`}
+      meta={chromeMeta}
       statusExtra={
         <>
           <span>

@@ -13,6 +13,7 @@ import { Stepper } from "../components/inputs/Stepper";
 import { Input } from "../components/inputs/Input";
 import { apiFetch } from "../lib/api";
 import { useCatalog } from "../hooks/useCatalog";
+import { useMeta, formatMetaForChrome } from "../hooks/useMeta";
 
 const ROLLING_MODES = [
   { t: "Mod 1 — Anchored", d: "formül + sinyal sabit, test kaydır", mode: 1 },
@@ -22,6 +23,8 @@ const ROLLING_MODES = [
 
 export default function BacktestStudio() {
   const { data: records = [] } = useCatalog();
+  const { data: metaData } = useMeta();
+  const chromeMeta = formatMetaForChrome(metaData);
   const top = [...records].sort((a, b) => (b.rank_ic ?? 0) - (a.rank_ic ?? 0));
   const [formula, setFormula] = useState("");
   const [window, setWindow] = useState<"test" | "train" | "all">("test");
@@ -112,6 +115,7 @@ export default function BacktestStudio() {
     <CChrome
       title="backtest studio"
       sub={activeFormula ? "α seçili · doğrulama modülleri" : "formül seçin"}
+      meta={chromeMeta}
       top={
         <>
           <Pill mono tone="accent">{activeFormula ? "α seçili" : "—"}</Pill>

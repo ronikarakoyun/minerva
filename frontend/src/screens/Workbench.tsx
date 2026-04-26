@@ -13,6 +13,7 @@ import { EquityChart } from "../components/charts/EquityChart";
 import { DrawdownChart } from "../components/charts/DrawdownChart";
 import { HeatmapRow } from "../components/charts/HeatmapRow";
 import { useCatalog } from "../hooks/useCatalog";
+import { useMeta, formatMetaForChrome } from "../hooks/useMeta";
 import { useJob } from "../hooks/useJob";
 import { apiFetch } from "../lib/api";
 import { EvaluateResult } from "../types";
@@ -42,22 +43,14 @@ function equityCurve(seed = 1, n = 200, drift = 0.0008, vol = 0.012): number[] {
   return out;
 }
 
-const MINING_PARAMS = [
-  { k: "Popülasyon Büyüklüğü", v: "300", hint: "pop_size" },
-  { k: "Maksimum Uzunluk (K)", v: "15", hint: "max_len" },
-  { k: "Mining içi fold sayısı", v: "5", hint: "wf_folds" },
-  { k: "Fold embargo (gün)", v: "5", hint: "embargo" },
-  { k: "Purge horizon (gün)", v: "10", hint: "purge" },
-  { k: "λ_std (stabilite cezası)", v: "0.50", hint: "lambda_std" },
-  { k: "λ_complexity", v: "0.001", hint: "lambda_c" },
-  { k: "λ_size", v: "0.50", hint: "lambda_size" },
-  { k: "Size-corr hard limit", v: "0.70", hint: "size_lim" },
-];
+// Removed MINING_PARAMS constant — now stateful in component
 
 export default function Workbench() {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const activeId = searchParams.get("id") ?? "";
+  const { data: metaData } = useMeta();
+  const chromeMeta = formatMetaForChrome(metaData);
 
   const { data: records = [] } = useCatalog();
 
@@ -73,6 +66,17 @@ export default function Workbench() {
     ensemble: false,
     time_overfit: false,
   });
+
+  // Mining params — stateful
+  const [mPopSize, setMPopSize] = useState("300");
+  const [mMaxK, setMMaxK] = useState("15");
+  const [mFolds, setMFolds] = useState("5");
+  const [mEmbargo, setMEmbargo] = useState("5");
+  const [mPurge, setMPurge] = useState("10");
+  const [mLambdaStd, setMLambdaStd] = useState("0.50");
+  const [mLambdaCx, setMLambdaCx] = useState("0.001");
+  const [mLambdaSize, setMLambdaSize] = useState("0.50");
+  const [mSizeCorr, setMSizeCorr] = useState("0.70");
 
   const [jobId, setJobId] = useState<string | null>(null);
   const [isLaunching, setIsLaunching] = useState(false);
@@ -118,33 +122,22 @@ export default function Workbench() {
 
   const isRunning = isLaunching || (!!jobId && !jobState.done);
 
-  // Demo data for when no real result is available
-  const demoAlpha = equityCurve(1, 200, 0.0014, 0.011);
-  const demoBench = equityCurve(99, 200, 0.0004, 0.009);
-  const demoDD = Array.from({ length: 200 }, (_, i) =>
-    -Math.abs(Math.sin(i / 12)) * Math.min(0.12, i * 0.0007)
-  );
-
   const displayResult: EvaluateResult | null = jobState.result;
-  const equityAlpha = displayResult?.equity_curve ?? demoAlpha;
-  const equityBench = demoBench;
-  const ddData = displayResult?.drawdown ?? demoDD;
-  const trainSplit = displayResult?.train_split ?? 126;
-  const foldSharpes = displayResult?.fold_sharpes ?? [1.8, 2.1, 2.4, 1.9, 2.3];
+  const equityAlpha = displayResult?.equity_curve ?? [];
+  const equityBench = displayResult?.equity_curve ? [] : [];
+  const ddData = displayResult?.drawdown ?? [];
+  const trainSplit = displayResult?.train_split ?? 0;
+  const foldSharpes = displayResult?.fold_sharpes ?? [];
 
   return (
     <CChrome
       title="workbench"
       sub="variant-c"
-      meta={{
-        train: "685,367 (63%)",
-        test: "410,452 (37%)",
-        split: "2023-04-18",
-        benchmark: "CSI 500",
-      }}
+      meta={chromeMeta}
       top={
         <>
           <Btn variant="ghost" onClick={() => navigate("/catalog")}>← Katalog</Btn>
+          <Btn variant="ghost" onClick={() => navigate("/llm-trainer")}>↺ Tree-LSTM</Btn>
           <Btn variant="primary" onClick={handleRun} disabled={isRunning || !formula}>
             {isRunning ? `Çalışıyor… ${Math.round(jobState.progress * 100)}%` : "▸ Run Backtest"}
           </Btn>
@@ -382,18 +375,21 @@ export default function Workbench() {
               <div>
                 <SectionLabel>MADENCİLİK</SectionLabel>
                 <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 6 }}>
-                  {MINING_PARAMS.slice(0, 5).map((p) => (
-                    <Field key={p.k} label={p.k} value={p.v} />
-                  ))}
+                  <Field label="Popülasyon Büyüklüğü" value={mPopSize} onChange={setMPopSize} hint="pop_size" />
+                  <Field label="Maksimum Uzunluk (K)" value={mMaxK} onChange={setMMaxK} hint="max_len" />
+                  <Field label="Mining içi fold sayısı" value={mFolds} onChange={setMFolds} hint="wf_folds" />
+                  <Field label="Fold embargo (gün)" value={mEmbargo} onChange={setMEmbargo} hint="embargo" />
+                  <Field label="Purge horizon (gün)" value={mPurge} onChange={setMPurge} hint="purge" />
                 </div>
               </div>
               <div>
                 <SectionLabel>NÖTRALİZASYON</SectionLabel>
                 <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 6 }}>
                   <Check label="Size / Vol / Mom" checked={neutralize} onChange={setNeutralize} />
-                  {MINING_PARAMS.slice(5, 9).map((p) => (
-                    <Field key={p.k} label={p.k} value={p.v} />
-                  ))}
+                  <Field label="λ_std (stabilite cezası)" value={mLambdaStd} onChange={setMLambdaStd} hint="lambda_std" />
+                  <Field label="λ_complexity" value={mLambdaCx} onChange={setMLambdaCx} hint="lambda_c" />
+                  <Field label="λ_size" value={mLambdaSize} onChange={setMLambdaSize} hint="lambda_size" />
+                  <Field label="Size-corr hard limit" value={mSizeCorr} onChange={setMSizeCorr} hint="size_lim" />
                 </div>
               </div>
             </div>

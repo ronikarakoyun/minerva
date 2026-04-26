@@ -28,16 +28,18 @@ export function CChrome({
     test?: string;
     split?: string;
     benchmark?: string;
+    benchmarkInfo?: string;
   };
   width?: number | string;
   height?: number | string;
   children: ReactNode;
 }) {
   const m = {
-    train:     meta?.train     ?? "—",
-    test:      meta?.test      ?? "—",
-    split:     meta?.split     ?? "—",
-    benchmark: meta?.benchmark ?? "—",
+    train:         meta?.train         ?? "—",
+    test:          meta?.test          ?? "—",
+    split:         meta?.split         ?? "—",
+    benchmark:     meta?.benchmark     ?? "—",
+    benchmarkInfo: meta?.benchmarkInfo ?? "",
   };
   return (
     <div
@@ -112,6 +114,9 @@ export function CChrome({
         </span>
         <span>
           <span style={{ color: "var(--fg-3)" }}>benchmark</span> {m.benchmark}
+          {m.benchmarkInfo && (
+            <span style={{ color: "var(--fg-3)" }}> · {m.benchmarkInfo}</span>
+          )}
         </span>
         {statusExtra}
         <span style={{ flex: 1 }} />
