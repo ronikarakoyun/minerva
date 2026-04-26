@@ -87,6 +87,13 @@ export default function Workbench() {
 
   const [launchError, setLaunchError] = useState<string | null>(null);
 
+  // Mining (evolution) job state
+  const [miningJobId, setMiningJobId] = useState<string | null>(null);
+  const [miningLaunching, setMiningLaunching] = useState(false);
+  const [miningError, setMiningError] = useState<string | null>(null);
+  const miningJob = useJob(miningJobId);
+  const isMining = miningLaunching || (!!miningJobId && !miningJob.done);
+
   const handleRun = async () => {
     if (!formula || isLaunching) return;
     setIsLaunching(true);
@@ -102,6 +109,37 @@ export default function Workbench() {
       setLaunchError(e?.message ?? "Backtest başlatılamadı");
     } finally {
       setIsLaunching(false);
+    }
+  };
+
+  const handleMining = async () => {
+    if (miningLaunching) return;
+    setMiningLaunching(true);
+    setMiningJobId(null);
+    setMiningError(null);
+    try {
+      const { job_id } = await apiFetch<{ job_id: string }>("/api/mining/start", {
+        method: "POST",
+        body: JSON.stringify({
+          window: backtestWindow === "all" ? "all" : "train",
+          num_gen: parseInt(mPopSize) || 200,
+          max_K: parseInt(mMaxK) || 15,
+          wf_n_folds: parseInt(mFolds) || 5,
+          wf_embargo: parseInt(mEmbargo) || 5,
+          wf_purge: parseInt(mPurge) || 10,
+          lambda_std: parseFloat(mLambdaStd) || 2.0,
+          lambda_cx: parseFloat(mLambdaCx) || 0.003,
+          lambda_size: parseFloat(mLambdaSize) || 0.5,
+          size_corr_hard_limit: parseFloat(mSizeCorr) || 0.7,
+          neutralize,
+          save_to_catalog: true,
+        }),
+      });
+      setMiningJobId(job_id);
+    } catch (e: any) {
+      setMiningError(e?.message ?? "Evrim başlatılamadı");
+    } finally {
+      setMiningLaunching(false);
     }
   };
 
@@ -368,6 +406,37 @@ export default function Workbench() {
                   <Field label="Size-corr hard limit" value={mSizeCorr} onChange={setMSizeCorr} hint="size_lim" />
                 </div>
               </div>
+            </div>
+
+            {/* Mining trigger + progress */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <Btn variant="primary" full onClick={handleMining} disabled={isMining}>
+                {isMining
+                  ? `⚡ Evrim çalışıyor… ${Math.round(miningJob.progress * 100)}%`
+                  : "⚡ Evrimsel Döngüyü Başlat (Mining)"}
+              </Btn>
+              {isMining && (
+                <>
+                  <div style={{ height: 3, background: "var(--bg-2)", borderRadius: 2, overflow: "hidden" }}>
+                    <div style={{ width: `${Math.round(miningJob.progress * 100)}%`, height: "100%", background: "var(--accent)", transition: "width 0.3s" }} />
+                  </div>
+                  <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)", maxHeight: 60, overflow: "auto" }}>
+                    {miningJob.logs.slice(-3).map((line, i) => (
+                      <div key={i}>{line}</div>
+                    ))}
+                  </div>
+                </>
+              )}
+              {miningJob.done && miningJob.result && (
+                <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--pos)" }}>
+                  ✓ {(miningJob.result as any)?.accepted ?? 0} formül kabul edildi · katalog güncellendi
+                </div>
+              )}
+              {(miningError || miningJob.error) && (
+                <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--neg)" }}>
+                  ⚠ {miningError ?? miningJob.error}
+                </div>
+              )}
             </div>
 
             {/* Validation */}

@@ -189,7 +189,7 @@ export default function ResultsReport() {
               </div>
 
               {/* Formül */}
-              <Panel num="01" title="Formül" sub="alpha ifadesi · AST köklü" flex={0}>
+              <Panel num="01" title="Formül" sub="alpha ifadesi · AST köklü" flex="0 0 auto">
                 <Box p={12}>
                   <code style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--fg-0)", wordBreak: "break-all", lineHeight: 1.7 }}>
                     {selectedFormula}
@@ -198,7 +198,7 @@ export default function ResultsReport() {
               </Panel>
 
               {/* KPI grid */}
-              <Panel num="02" title="Performans Özeti" sub="temel metrikler" flex={0}>
+              <Panel num="02" title="Performans Özeti" sub="temel metrikler" flex="0 0 auto">
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
                   <Stat
                     label="Sharpe / IR"
@@ -246,7 +246,7 @@ export default function ResultsReport() {
               </Panel>
 
               {/* Equity chart */}
-              <Panel num="03" title="Equity Eğrisi" sub="alpha vs benchmark" flex={0}>
+              <Panel num="03" title="Equity Eğrisi" sub="alpha vs benchmark" flex="0 0 auto">
                 <div
                   style={{
                     background: "var(--bg-1)",
@@ -266,7 +266,7 @@ export default function ResultsReport() {
               </Panel>
 
               {/* Drawdown */}
-              <Panel num="04" title="Drawdown" sub="pik'ten çekilme" flex={0}>
+              <Panel num="04" title="Drawdown" sub="pik'ten çekilme" flex="0 0 auto">
                 <div
                   style={{
                     background: "var(--bg-1)",
@@ -294,14 +294,16 @@ export default function ResultsReport() {
 
               {/* Walk-forward fold heatmap */}
               {foldSharpes.length > 0 && (
-                <Panel num="05" title="Walk-Forward Foldlar" sub={`${foldSharpes.length} fold · Sharpe dağılımı`} flex={0}>
+                <Panel num="05" title="Walk-Forward Foldlar" sub={`${foldSharpes.length} fold · Sharpe dağılımı`} flex="0 0 auto">
                   <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                     {foldSharpes.map((_, fi) => (
                       <div key={fi} style={{ display: "flex", alignItems: "center", gap: 10 }}>
                         <span style={{ fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--fg-3)", minWidth: 32 }}>
                           fold-{fi + 1}
                         </span>
-                        <HeatmapRow values={[foldSharpes[fi]]} label={`fold-${fi + 1}`} width={700} h={20} />
+                        <div style={{ flex: 1 }}>
+                          <HeatmapRow values={[foldSharpes[fi]]} label={`fold-${fi + 1}`} width={1000} h={20} />
+                        </div>
                         <span style={{ fontFamily: "var(--mono)", fontSize: 9.5, color: foldSharpes[fi] > 0 ? "var(--pos)" : "var(--neg)", minWidth: 40 }}>
                           {foldSharpes[fi].toFixed(2)}
                         </span>
@@ -312,7 +314,7 @@ export default function ResultsReport() {
               )}
 
               {/* Metodoloji notu */}
-              <Panel num="06" title="Metodoloji" sub="referans" flex={0}>
+              <Panel num="06" title="Metodoloji" sub="referans" flex="0 0 auto">
                 <Box p={12}>
                   <div style={{ display: "flex", flexDirection: "column", gap: 8, fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-2)", lineHeight: 1.7 }}>
                     <div>
