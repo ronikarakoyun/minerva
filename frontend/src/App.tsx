@@ -7,6 +7,7 @@ const Workbench = lazy(() => import("./screens/Workbench"));
 const LLMTrainer = lazy(() => import("./screens/LLMTrainer"));
 const BestAlphas = lazy(() => import("./screens/BestAlphas"));
 const BacktestStudio = lazy(() => import("./screens/BacktestStudio"));
+const ResultsReport = lazy(() => import("./screens/ResultsReport"));
 
 function Loading() {
   return (
@@ -27,6 +28,7 @@ export default function App() {
         <Route path="/llm-trainer" element={<LLMTrainer />} />
         <Route path="/best-alphas" element={<BestAlphas />} />
         <Route path="/backtest-studio" element={<BacktestStudio />} />
+        <Route path="/results-report" element={<ResultsReport />} />
         <Route path="*" element={<Home />} />
       </Routes>
     </Suspense>
@@ -50,6 +52,7 @@ function Home() {
           ["/llm-trainer", "LLM → Tree-LSTM Eğitici"],
           ["/best-alphas", "En İyi Alphalar"],
           ["/backtest-studio", "Backtest Studio — Doğrulama"],
+          ["/results-report", "Results Report — PDF Export"],
         ].map(([path, label]) => (
           <li key={path} style={{ fontFamily: "var(--mono)", fontSize: 11 }}>
             →{" "}

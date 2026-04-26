@@ -1,6 +1,7 @@
-"""POST /api/backtest/* — Faz 2 doğrulama modülleri: DSR, PBO, Rolling WF, Ensemble, Overfit."""
+"""POST /api/backtest/* — Faz 2 doğrulama modülleri + Workbench job-based backtest."""
 from __future__ import annotations
 
+import asyncio
 import itertools
 from typing import Any, Optional
 
@@ -9,6 +10,7 @@ import pandas as pd
 from fastapi import APIRouter
 
 from api.deps import get_benchmark, get_cfg, get_market_db, get_split_date
+from api.jobs import registry
 from api.schemas import EvaluateRequest, EvaluateResponse
 from engine.api_helpers import (
     evaluate_ic,
@@ -481,3 +483,53 @@ def overfit(req: OverfitRequest) -> OverfitResponse:
         )
     except Exception as e:
         return OverfitResponse(error=str(e))
+
+
+# ─── Job-based Backtest (Workbench "▸ Run Backtest") ───────────────────────
+
+class BacktestRunRequest(BaseModel):
+    formula: str
+    window: str = "test"
+    validations: dict = {}
+
+
+class BacktestRunResponse(BaseModel):
+    job_id: str
+
+
+@router.post("/run", response_model=BacktestRunResponse)
+async def run_backtest_job(req: BacktestRunRequest) -> BacktestRunResponse:
+    """Workbench'in "▸ Run Backtest" butonu — async job döner, WS üzerinden takip edilir."""
+    job = registry.create()
+    job.status = "running"
+
+    async def _run():
+        try:
+            await job.emit_log(f"Başlatılıyor: {req.formula[:60]}…")
+            await job.emit_progress(0.05)
+
+            db = get_market_db()
+            split_ts = get_split_date()
+            cfg = get_cfg()
+            bm = get_benchmark()
+
+            result = await asyncio.to_thread(
+                run_full_evaluate,
+                req.formula,
+                db,
+                split_ts,
+                cfg,
+                req.window,
+                bm,
+            )
+
+            await job.emit_progress(0.95)
+            await job.emit_log("Backtest tamamlandı")
+            await job.finish(result)
+
+        except Exception as exc:
+            await job.emit_log(f"HATA: {exc}")
+            await job.fail(str(exc))
+
+    asyncio.create_task(_run())
+    return BacktestRunResponse(job_id=job.id)

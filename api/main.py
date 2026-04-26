@@ -19,7 +19,7 @@ if _REPO_ROOT not in sys.path:
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routes import backtest, catalog, formulas, jobs as jobs_routes
+from api.routes import backtest, catalog, formulas, jobs as jobs_routes, mining
 
 app = FastAPI(
     title="Minerva v3 API",
@@ -72,3 +72,4 @@ app.include_router(formulas.router, prefix="/api/formulas", tags=["formulas"])
 app.include_router(backtest.router, prefix="/api/backtest", tags=["backtest"])
 app.include_router(jobs_routes.router, prefix="/api/jobs", tags=["jobs"])
 app.include_router(jobs_routes.ws_router)  # WebSocket /ws/jobs/{id}
+app.include_router(mining.router, prefix="/api/mining", tags=["mining"])

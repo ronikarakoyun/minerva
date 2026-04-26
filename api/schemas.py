@@ -68,6 +68,7 @@ class JobStatus(BaseModel):
     status: str        # "pending" | "running" | "done" | "error"
     progress: float = 0.0
     error: Optional[str] = None
+    result: Optional[Any] = None
 
 
 class BacktestRequest(BaseModel):

@@ -24,7 +24,8 @@ def get_status(job_id: str) -> JobStatus:
     if job is None:
         raise HTTPException(status_code=404, detail="Job bulunamadı")
     return JobStatus(
-        id=job.id, status=job.status, progress=job.progress, error=job.error
+        id=job.id, status=job.status, progress=job.progress,
+        error=job.error, result=job.result
     )
 
 

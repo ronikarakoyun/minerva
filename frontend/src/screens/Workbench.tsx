@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import { CChrome } from "../components/chrome/CChrome";
 import { Btn } from "../components/atoms/Btn";
@@ -13,7 +13,8 @@ import { EquityChart } from "../components/charts/EquityChart";
 import { DrawdownChart } from "../components/charts/DrawdownChart";
 import { HeatmapRow } from "../components/charts/HeatmapRow";
 import { useCatalog } from "../hooks/useCatalog";
-import { useFormula } from "../hooks/useFormula";
+import { useJob } from "../hooks/useJob";
+import { apiFetch } from "../lib/api";
 import { EvaluateResult } from "../types";
 
 // Operator token coloring
@@ -59,9 +60,8 @@ export default function Workbench() {
   const activeId = searchParams.get("id") ?? "";
 
   const { data: records = [] } = useCatalog();
-  const evaluateMutation = useFormula();
 
-  const [window, setWindow] = useState<"test" | "train" | "all">("test");
+  const [backtestWindow, setBacktestWindow] = useState<"test" | "train" | "all">("test");
   const [filterText, setFilterText] = useState("");
   const [sourceFilter, setSourceFilter] = useState("EVO");
   const [neutralize, setNeutralize] = useState(true);
@@ -74,7 +74,9 @@ export default function Workbench() {
     time_overfit: false,
   });
 
-  const [result, setResult] = useState<EvaluateResult | null>(null);
+  const [jobId, setJobId] = useState<string | null>(null);
+  const [isLaunching, setIsLaunching] = useState(false);
+  const jobState = useJob(jobId);
 
   const activeRecord = records.find((r) => r.formula === activeId) ?? records[0] ?? null;
   const formula = activeRecord?.formula ?? "";
@@ -92,12 +94,19 @@ export default function Workbench() {
   });
 
   const handleRun = async () => {
-    if (!formula) return;
+    if (!formula || isLaunching) return;
+    setIsLaunching(true);
+    setJobId(null);
     try {
-      const res = await evaluateMutation.mutateAsync({ formula, window });
-      setResult(res);
+      const { job_id } = await apiFetch<{ job_id: string }>("/api/backtest/run", {
+        method: "POST",
+        body: JSON.stringify({ formula, window: backtestWindow, validations }),
+      });
+      setJobId(job_id);
     } catch (e) {
       console.error(e);
+    } finally {
+      setIsLaunching(false);
     }
   };
 
@@ -107,6 +116,8 @@ export default function Workbench() {
     "TAM": "all",
   };
 
+  const isRunning = isLaunching || (!!jobId && !jobState.done);
+
   // Demo data for when no real result is available
   const demoAlpha = equityCurve(1, 200, 0.0014, 0.011);
   const demoBench = equityCurve(99, 200, 0.0004, 0.009);
@@ -114,7 +125,7 @@ export default function Workbench() {
     -Math.abs(Math.sin(i / 12)) * Math.min(0.12, i * 0.0007)
   );
 
-  const displayResult = result;
+  const displayResult: EvaluateResult | null = jobState.result;
   const equityAlpha = displayResult?.equity_curve ?? demoAlpha;
   const equityBench = demoBench;
   const ddData = displayResult?.drawdown ?? demoDD;
@@ -134,11 +145,8 @@ export default function Workbench() {
       top={
         <>
           <Btn variant="ghost" onClick={() => navigate("/catalog")}>← Katalog</Btn>
-          <Btn variant="ghost" onClick={handleRun} disabled={evaluateMutation.isPending}>
-            ↺ Tree-LSTM
-          </Btn>
-          <Btn variant="primary" onClick={handleRun} disabled={evaluateMutation.isPending || !formula}>
-            {evaluateMutation.isPending ? "Çalışıyor…" : "▸ Run Backtest"}
+          <Btn variant="primary" onClick={handleRun} disabled={isRunning || !formula}>
+            {isRunning ? `Çalışıyor… ${Math.round(jobState.progress * 100)}%` : "▸ Run Backtest"}
           </Btn>
         </>
       }
@@ -362,9 +370,9 @@ export default function Workbench() {
                 <SegRow
                   options={["TEST · oos", "TRAIN · is", "TAM"]}
                   value={
-                    window === "test" ? "TEST · oos" : window === "train" ? "TRAIN · is" : "TAM"
+                    backtestWindow === "test" ? "TEST · oos" : backtestWindow === "train" ? "TRAIN · is" : "TAM"
                   }
-                  onChange={(v) => setWindow(windowLabel[v] ?? "test")}
+                  onChange={(v) => setBacktestWindow(windowLabel[v] ?? "test")}
                 />
               </div>
             </div>
@@ -461,7 +469,7 @@ export default function Workbench() {
             </span>
             <span style={{ flex: 1 }} />
             <span style={{ fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--fg-3)" }}>
-              {window === "test" ? "oos · 410k" : window === "train" ? "is · 685k" : "tam"}
+              {backtestWindow === "test" ? "oos · 410k" : backtestWindow === "train" ? "is · 685k" : "tam"}
             </span>
           </div>
 
@@ -474,6 +482,30 @@ export default function Workbench() {
               gap: 14,
             }}
           >
+            {/* Job progress */}
+            {(isRunning || (jobId && jobState.logs.length > 0)) && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <div style={{ flex: 1, height: 3, background: "var(--bg-2)", borderRadius: 2, overflow: "hidden" }}>
+                    <div style={{ width: `${Math.round(jobState.progress * 100)}%`, height: "100%", background: "var(--accent)", transition: "width 0.3s" }} />
+                  </div>
+                  <span style={{ fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--fg-3)", minWidth: 32 }}>
+                    {Math.round(jobState.progress * 100)}%
+                  </span>
+                </div>
+                {jobState.logs.slice(-3).map((line, i) => (
+                  <div key={i} style={{ fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--fg-3)" }}>
+                    {line}
+                  </div>
+                ))}
+                {jobState.error && (
+                  <div style={{ fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--neg)" }}>
+                    ⚠ {jobState.error}
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* KPIs */}
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
               <Stat
@@ -599,7 +631,7 @@ export default function Workbench() {
               </div>
             </div>
 
-            {evaluateMutation.isError && (
+            {jobState.error && !isRunning && (
               <div
                 style={{
                   padding: 10,
@@ -611,7 +643,7 @@ export default function Workbench() {
                   color: "var(--neg)",
                 }}
               >
-                ⚠ {evaluateMutation.error?.message}
+                ⚠ {jobState.error}
               </div>
             )}
           </div>
