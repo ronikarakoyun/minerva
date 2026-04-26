@@ -1,5 +1,15 @@
 import { ReactNode } from "react";
+import { Link, useLocation } from "react-router-dom";
 import { Logo } from "../atoms/Logo";
+
+const NAV = [
+  { path: "/workbench",      label: "workbench" },
+  { path: "/catalog",        label: "catalog" },
+  { path: "/llm-trainer",    label: "llm" },
+  { path: "/best-alphas",    label: "best" },
+  { path: "/backtest-studio",label: "validate" },
+  { path: "/results-report", label: "report" },
+];
 
 /**
  * CChrome — universal frame (1280×820 default).
@@ -7,6 +17,37 @@ import { Logo } from "../atoms/Logo";
  *
  * Mock: minerva-chrome.jsx CChrome komponenti.
  */
+function NavLinks({ title }: { title: string }) {
+  const loc = useLocation();
+  return (
+    <nav style={{ display: "flex", alignItems: "center", gap: 2 }}>
+      {NAV.map((n) => {
+        const active = loc.pathname === n.path;
+        return (
+          <Link
+            key={n.path}
+            to={n.path}
+            style={{
+              fontFamily: "var(--mono)",
+              fontSize: 10,
+              color: active ? "var(--fg-0)" : "var(--fg-3)",
+              background: active ? "var(--bg-2)" : "transparent",
+              padding: "3px 8px",
+              borderRadius: 2,
+              textDecoration: "none",
+              letterSpacing: "0.02em",
+              border: active ? "1px solid var(--line)" : "1px solid transparent",
+              transition: "color 0.15s",
+            }}
+          >
+            {n.label}
+          </Link>
+        );
+      })}
+    </nav>
+  );
+}
+
 export function CChrome({
   title,
   sub,
@@ -87,6 +128,8 @@ export function CChrome({
             · {sub}
           </span>
         )}
+        <span style={{ height: 14, width: 1, background: "var(--line)", margin: "0 4px" }} />
+        <NavLinks title={title} />
         <span style={{ flex: 1 }} />
         {top}
       </div>
