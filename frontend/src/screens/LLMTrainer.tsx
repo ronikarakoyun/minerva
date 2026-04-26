@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { CChrome } from "../components/chrome/CChrome";
 import { Panel } from "../components/chrome/Panel";
 import { Box } from "../components/chrome/Box";
@@ -7,8 +8,10 @@ import { Pill } from "../components/atoms/Pill";
 import { Stat } from "../components/atoms/Stat";
 import { Check } from "../components/atoms/Check";
 import { Note } from "../components/inputs/Note";
+import { Stepper } from "../components/inputs/Stepper";
 import { MiniSparkline } from "../components/charts/MiniSparkline";
 import { apiFetch } from "../lib/api";
+import { useJob } from "../hooks/useJob";
 
 const SAMPLE = `Rank(Mul(Sub(Pclose, Popen), Vlot), 20)
 CSRank(Delta(Pvwap, 30))
@@ -23,8 +26,6 @@ const OPERATORS = [
   { k: "features", v: "Popen · Phigh · Plow · Pclose · Vlot · Pvwap" },
 ];
 
-const lossData = Array.from({ length: 24 }, (_, i) => 0.4 * Math.exp(-i / 8) + 0.04 + (Math.random() - 0.5) * 0.01);
-
 interface ParseResult {
   formula: string;
   ok: boolean;
@@ -33,17 +34,36 @@ interface ParseResult {
   error?: string;
 }
 
+interface BufferStatus {
+  size: number;
+  capacity: number;
+}
+
 export default function LLMTrainer() {
   const [text, setText] = useState(SAMPLE);
   const [wfFitness, setWfFitness] = useState(false);
+  const [epochs, setEpochs] = useState(5);
   const [results, setResults] = useState<ParseResult[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [parseLoading, setParseLoading] = useState(false);
   const [lastRun, setLastRun] = useState<string | null>(null);
+
+  // Training job state
+  const [trainJobId, setTrainJobId] = useState<string | null>(null);
+  const [isLaunching, setIsLaunching] = useState(false);
+  const trainJob = useJob(trainJobId);
+  const isTraining = isLaunching || (!!trainJobId && !trainJob.done);
+
+  // Buffer size (auto-refresh every 5s, more frequent after parse/train)
+  const { data: bufStatus, refetch: refetchBuf } = useQuery<BufferStatus>({
+    queryKey: ["training-buffer"],
+    queryFn: () => apiFetch("/api/training/buffer"),
+    refetchInterval: 5000,
+  });
 
   const handleParse = async () => {
     const formulas = text.split("\n").map((l) => l.trim()).filter(Boolean);
     if (!formulas.length) return;
-    setLoading(true);
+    setParseLoading(true);
     try {
       const res = await apiFetch<ParseResult[]>("/api/backtest/parse-multi", {
         method: "POST",
@@ -51,13 +71,41 @@ export default function LLMTrainer() {
       });
       setResults(res);
       setLastRun(`${formulas.length} formül`);
+      refetchBuf();
     } catch (e: any) {
       setResults([{ formula: "?", ok: false, error: e.message }]);
     }
-    setLoading(false);
+    setParseLoading(false);
   };
 
-  const handleLoadSample = () => setText(SAMPLE);
+  const handleTrain = async () => {
+    if (isLaunching) return;
+    setIsLaunching(true);
+    setTrainJobId(null);
+    try {
+      const { job_id } = await apiFetch<{ job_id: string }>("/api/training/run", {
+        method: "POST",
+        body: JSON.stringify({ epochs, batch_size: 32, use_policy: false }),
+      });
+      setTrainJobId(job_id);
+    } catch (e: any) {
+      console.error(e);
+    } finally {
+      setIsLaunching(false);
+    }
+  };
+
+  // When training job finishes, refresh buffer count
+  if (trainJob.done && trainJobId) {
+    refetchBuf();
+  }
+
+  const trainResult = trainJob.result as Record<string, any> | null;
+  const lossCurve: number[] = trainResult?.loss_curve ?? [];
+
+  const bufferSize = bufStatus?.size ?? 0;
+  const lastLoss = trainResult?.last_loss;
+  const epochsDone = trainResult?.epochs_done;
 
   return (
     <CChrome
@@ -65,10 +113,16 @@ export default function LLMTrainer() {
       sub="harici LLM formüllerini öğret"
       top={
         <>
-          <Pill mono tone="ghost">replay buffer · —</Pill>
-          <Btn variant="ghost">↺ Tree-LSTM Eğit</Btn>
-          <Btn primary onClick={handleParse} disabled={loading}>
-            {loading ? "Hesaplanıyor…" : "▸ Parse & Değerlendir"}
+          <Pill mono tone={bufferSize > 0 ? "pos" : "ghost"}>
+            replay buffer · {bufferSize}
+          </Pill>
+          <Btn variant="ghost" onClick={handleTrain} disabled={isTraining || bufferSize < 2}>
+            {isTraining
+              ? `Eğitiliyor… ${Math.round(trainJob.progress * 100)}%`
+              : "↺ Tree-LSTM Eğit"}
+          </Btn>
+          <Btn primary onClick={handleParse} disabled={parseLoading}>
+            {parseLoading ? "Hesaplanıyor…" : "▸ Parse & Değerlendir"}
           </Btn>
         </>
       }
@@ -108,9 +162,9 @@ export default function LLMTrainer() {
             <div style={{ display: "flex", alignItems: "center", gap: 14, marginTop: 12 }}>
               <Check label="LLM formüller için WF-Fitness hesapla" hint="daha yavaş · fold=5" checked={wfFitness} onChange={setWfFitness} />
               <span style={{ flex: 1 }} />
-              <Btn variant="ghost" onClick={handleLoadSample}>Örnekleri yükle</Btn>
-              <Btn primary onClick={handleParse} disabled={loading}>
-                {loading ? "…" : "▸ Parse & Değerlendir"}
+              <Btn variant="ghost" onClick={() => setText(SAMPLE)}>Örnekleri yükle</Btn>
+              <Btn primary onClick={handleParse} disabled={parseLoading}>
+                {parseLoading ? "…" : "▸ Parse & Değerlendir"}
               </Btn>
             </div>
 
@@ -174,7 +228,7 @@ export default function LLMTrainer() {
                           ric {r.rank_ic != null ? r.rank_ic.toFixed(4) : "—"}
                         </span>
                         <Pill mono tone={(r.ic ?? 0) > 0.005 ? "pos" : "ghost"}>
-                          {(r.ic ?? 0) > 0.005 ? "parsed" : "low ic"}
+                          {(r.ic ?? 0) > 0.005 ? "buffer+" : "low ic"}
                         </Pill>
                       </>
                     ) : (
@@ -187,22 +241,55 @@ export default function LLMTrainer() {
               </div>
             )}
 
+            {/* Training progress */}
+            {isTraining && (
+              <div style={{ marginTop: 14 }}>
+                <div style={{ height: 3, background: "var(--bg-2)", borderRadius: 2, overflow: "hidden", marginBottom: 6 }}>
+                  <div style={{ width: `${Math.round(trainJob.progress * 100)}%`, height: "100%", background: "var(--accent)", transition: "width 0.3s" }} />
+                </div>
+                <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)" }}>
+                  {trainJob.logs[trainJob.logs.length - 1] ?? "başlatılıyor…"}
+                </div>
+              </div>
+            )}
+
+            {trainJob.error && (
+              <div style={{ marginTop: 10, fontFamily: "var(--mono)", fontSize: 10, color: "var(--neg)" }}>
+                ⚠ {trainJob.error}
+              </div>
+            )}
+
             <div style={{ marginTop: 18 }}>
               <div style={{ fontSize: 10, fontFamily: "var(--mono)", color: "var(--fg-3)", letterSpacing: 0.5, marginBottom: 6 }}>
                 TREE-LSTM · TRAINING STATS
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-                <Stat label="Buffer" value="—" hint="formula seen" />
-                <Stat label="Last loss" value="—" hint="epoch —" />
+                <Stat label="Buffer" value={bufferSize > 0 ? bufferSize.toLocaleString("tr-TR") : "—"} hint="formül" />
+                <Stat
+                  label="Last loss"
+                  value={lastLoss != null ? lastLoss.toFixed(4) : "—"}
+                  hint={epochsDone != null ? `epoch ${epochsDone}` : "—"}
+                />
                 <Stat label="Embedding dim" value="64" />
-                <Stat label="Lr" value="3e-4" />
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  <Stepper label="Epoch" value={epochs} onChange={setEpochs} min={1} max={100} />
+                  <Btn mono small full onClick={handleTrain} disabled={isTraining || bufferSize < 2}>
+                    {isTraining ? `${Math.round(trainJob.progress * 100)}%` : "↺ Eğit"}
+                  </Btn>
+                </div>
               </div>
               <div style={{ marginTop: 10 }}>
                 <Box p={8}>
                   <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)", marginBottom: 4 }}>
-                    LOSS · last 24 epochs
+                    LOSS · {lossCurve.length > 0 ? `son ${lossCurve.length} epoch` : "henüz eğitilmedi"}
                   </div>
-                  <MiniSparkline data={lossData} width={300} height={36} color="var(--accent)" fill />
+                  <MiniSparkline
+                    data={lossCurve.length > 0 ? lossCurve : Array.from({ length: 24 }, (_, i) => 0.4 * Math.exp(-i / 8) + 0.04)}
+                    width={300}
+                    height={36}
+                    color={lossCurve.length > 0 ? "var(--accent)" : "var(--fg-3)"}
+                    fill
+                  />
                 </Box>
               </div>
             </div>

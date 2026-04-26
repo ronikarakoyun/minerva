@@ -50,6 +50,10 @@ def parse_multi(req: MultiParseRequest) -> list[ParseResult]:
     df_window = slice_db_by_window(db, req.window, split_ts)
     idx = prepare_eval_idx(df_window)
 
+    from api.deps import get_brain
+    brain = get_brain()
+    buf = brain["buffer"]
+
     results: list[ParseResult] = []
     for formula in req.formulas:
         formula = formula.strip()
@@ -58,12 +62,15 @@ def parse_multi(req: MultiParseRequest) -> list[ParseResult]:
         try:
             tree = parse_or_raise(formula, cfg)
             ic_stats = evaluate_ic(tree, idx, cfg)
+            rank_ic = ic_stats.get("rank_ic") or 0.0
             results.append(ParseResult(
                 formula=formula,
                 ok=True,
                 ic=ic_stats.get("ic"),
-                rank_ic=ic_stats.get("rank_ic"),
+                rank_ic=rank_ic,
             ))
+            if abs(rank_ic) > 0.002:
+                buf.add(tree, float(rank_ic))
         except Exception as e:
             results.append(ParseResult(formula=formula, ok=False, error=str(e)))
 
