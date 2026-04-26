@@ -88,6 +88,7 @@ def make_purged_date_folds(
     min_fold_days: int = 20,
     embargo_days: int = 5,
     purge_horizon: int = 10,
+    return_window: int = 2,
 ) -> list[dict]:
     """
     Purged K-Fold (López de Prado, AFML §7).
@@ -102,7 +103,19 @@ def make_purged_date_folds(
 
     Geriye uyumluluk: purge_horizon=0 → list[dict] formatında eski
     make_date_folds davranışı (train = tüm veri - test).
+
+    return_window: Hedef değişkenin kaç gün ileriye baktığı (Next_Ret=2,
+    TB_Label=tb_horizon). purge_horizon < return_window ise fold
+    sınırlarında label leakage oluşur — bu durumda uyarı verilir.
     """
+    import warnings
+    if purge_horizon < return_window:
+        warnings.warn(
+            f"purge_horizon={purge_horizon} < return_window={return_window}: "
+            "fold sınırlarında label leakage riski var. "
+            f"purge_horizon'ı en az {return_window} olarak ayarla.",
+            stacklevel=2,
+        )
     unique_dates = np.sort(np.unique(pd.to_datetime(dates)))
     n = len(unique_dates)
     ranges = _slice_fold_ranges(unique_dates, n_folds, min_fold_days, embargo_days)

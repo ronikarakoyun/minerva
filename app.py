@@ -46,6 +46,10 @@ if "trees" not in st.session_state:
     }
 if "train_hist" not in st.session_state:
     st.session_state.train_hist = []  # [{total,value,policy,n,buffer},...]
+# Split-date sentinel: önceki split ile üretilmiş ağaçlar yeni split'te
+# veri sızıntısına yol açar → split değişince in-memory sonuçları temizle.
+if "_split_date_sentinel" not in st.session_state:
+    st.session_state["_split_date_sentinel"] = None
 
 
 @st.cache_data
@@ -147,6 +151,19 @@ split_ts = pd.to_datetime(split_date)
 db_train = db[db["Date"] < split_ts].copy()
 db_test  = db[db["Date"] >= split_ts].copy()
 
+# Veri sızıntısı koruması: split_date değişince önceki split'te üretilmiş
+# tüm in-memory ağaçları ve alpha tablosunu temizle. Katalog dosyası
+# dokunulmadan kalır; kullanıcı tekrar mining yaparak yeniden doldurabilir.
+_current_sentinel = str(split_date)
+if st.session_state["_split_date_sentinel"] not in (None, _current_sentinel):
+    st.session_state.trees  = {}
+    st.session_state.alphas = pd.DataFrame()
+    st.warning(
+        f"⚠️ Split tarihi değişti → önceki mining sonuçları temizlendi. "
+        f"Yeni split: **{split_date}** — veri sızıntısı önlendi."
+    )
+st.session_state["_split_date_sentinel"] = _current_sentinel
+
 _n_tr, _n_te = len(db_train), len(db_test)
 _pct = 100 * _n_tr / max(len(db), 1)
 st.sidebar.caption(
@@ -195,6 +212,15 @@ wf_purge = st.sidebar.slider(
         "0 = purge yok (eski davranış); ≥1 = purge aktif."
     ),
 )
+# Purge ↔ return_window güvenlik kontrolü
+if use_wf_fitness and int(wf_purge) > 0:
+    _min_purge = int(tb_horizon) if target_mode.startswith("🎯") else 2
+    if int(wf_purge) < _min_purge:
+        st.sidebar.warning(
+            f"⚠️ Purge horizon ({wf_purge} gün) < return window ({_min_purge} gün) — "
+            "fold sınırlarında label leakage riski! "
+            f"En az **{_min_purge}** olarak ayarla."
+        )
 wf_lambda_std = st.sidebar.slider("λ_std (stabilite cezası)", 0.0, 4.0, 0.5, 0.5,
                                    disabled=not use_wf_fitness,
                                    help="Yüksek → sadece çok tutarlı formüller geçer. "
@@ -423,6 +449,16 @@ with st.expander("🤖 LLM formüllerini Tree-LSTM'e öğret", expanded=False):
                 _idx = _eval.set_index(["Ticker", "Date"]).sort_index()
 
             parsed = parse_many(llm_text, cfg)
+            # Atlanmış (boş/yorum) satır sayısını hesapla
+            _total_input_lines = sum(
+                1 for ln in llm_text.splitlines()
+                if ln.strip() and not ln.strip().startswith("#")
+            )
+            _skipped = _total_input_lines - len(parsed)
+            if _skipped > 0:
+                st.caption(f"ℹ️ {_skipped} satır yorum veya boş — atlandı.")
+            if not parsed:
+                st.warning("Parse edilecek formül bulunamadı. Yorum (#) ve boş satırları kaldır.")
             rows = []
             alpha_rows = []   # session_state.alphas'a eklenecekler
             bar_llm = st.progress(0.0)
@@ -464,6 +500,7 @@ with st.expander("🤖 LLM formüllerini Tree-LSTM'e öğret", expanded=False):
                                             _llm_dates, n_folds=int(wf_n_folds),
                                             min_fold_days=20, embargo_days=int(wf_embargo),
                                             purge_horizon=int(wf_purge),
+                                            return_window=2,  # LLM paneli her zaman Next_Ret (2-gün pencere)
                                         )
                                     else:
                                         _llm_folds = make_date_folds(
@@ -717,12 +754,14 @@ if st.sidebar.button("⛏️ Evrimsel Döngüyü Başlat"):
         dates_arr = idx.index.get_level_values("Date").values
         if int(wf_purge) > 0:
             # Purged K-Fold: her fold için ayrı test/train split (LdP §7)
+            _rw = int(tb_horizon) if target_mode.startswith("🎯") else 2
             mining_folds = make_purged_date_folds(
                 dates_arr,
                 n_folds=int(wf_n_folds),
                 min_fold_days=20,
                 embargo_days=int(wf_embargo),
                 purge_horizon=int(wf_purge),
+                return_window=_rw,
             )
         else:
             # Klasik non-overlapping fold (embargo var, purge yok)

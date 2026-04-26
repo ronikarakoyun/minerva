@@ -32,8 +32,17 @@ Benchmark:
   - Beta = strateji / benchmark kovaryansı
   Böylece "%260 ham getiri" ile "alfa mı beta mı?" sorusu cevaplanır.
 """
+import warnings
+
 import pandas as pd
 import numpy as np
+
+# ------------------------------------------------------------------
+# Modül-seviyesi sabitler — sihirli sayılar tek yerde
+# ------------------------------------------------------------------
+RETURN_WINDOW_DAYS   = 2      # Period_Ret = Pclose_{t+2}/Pclose_{t+1}-1
+MIN_BACKTEST_DAYS    = 60     # Yıllıklandırma için güvenilir minimum gün sayısı
+BM_COVERAGE_WARN_PCT = 0.90   # Benchmark tarih kapsamı bu eşiğin altına düşerse uyar
 
 
 def run_pro_backtest(
@@ -85,6 +94,15 @@ def run_pro_backtest(
     # Kritik: son 2 günde tüm Period_Ret NaN olunca pivot_table bu tarihleri
     # düşürebilir → ret_piv < sig_piv boyutu → IndexError. Reindex ile hizala.
     ret_piv = ret_piv.reindex(index=sig_piv.index, columns=sig_piv.columns)
+
+    # Tüm getiriler NaN → pencere çok kısa (< RETURN_WINDOW_DAYS + 1 gün)
+    if not ret_piv.notna().any(axis=None):
+        warnings.warn(
+            "Tüm Period_Ret değerleri NaN — backtest penceresi çok kısa "
+            f"(en az {RETURN_WINDOW_DAYS + 1} günlük sinyal gerekli). "
+            "Dönen metrikler anlamsız olacak.",
+            stacklevel=2,
+        )
 
     dates     = sig_piv.index.tolist()
     n_dates   = len(dates)
@@ -141,9 +159,13 @@ def run_pro_backtest(
             drop_n = len(worst_in_port)
 
         # Günlük portföy getirisi
-        port_rets     = ret_arr[di, portfolio]
-        valid_rets    = port_rets[~np.isnan(port_rets)]
-        rets          = float(valid_rets.mean()) if len(valid_rets) > 0 else 0.0
+        # NaN pozisyonlar (genellikle son 2 gün — shift(-2) yokluğu) 0 getiri
+        # olarak sayılır: portfolyoda tutuyoruz ama exit fiyatı yok.
+        # Sadece valid_rets.mean() almak NaN'ları dışarıda bırakır ve
+        # son günlerde yukarı bias oluşturur.
+        port_rets = ret_arr[di, portfolio]
+        port_size = int(portfolio.sum())
+        rets      = float(np.nansum(port_rets)) / max(port_size, 1)
 
         size      = int(portfolio.sum())
         buy_cost  = (add_n  / max(size, 1)) * buy_fee
@@ -159,6 +181,12 @@ def run_pro_backtest(
     mdd_abs = float(abs(((equity / np.maximum.accumulate(equity)) - 1).min()) * 100)
     n_d     = max(n_dates, 1)
     arr     = ((equity[-1] / 100_000) ** (252 / n_d) - 1) * 100
+    if n_d < MIN_BACKTEST_DAYS:
+        warnings.warn(
+            f"Yıllıklandırılmış getiri ({n_d} günlük pencere) güvenilmez: "
+            f"en az {MIN_BACKTEST_DAYS} gün önerilir.",
+            stacklevel=2,
+        )
     net_ret = (equity[-1] / 100_000 - 1) * 100
 
     curve   = pd.DataFrame({"Date": dates, "Equity": equity})
@@ -174,9 +202,20 @@ def run_pro_backtest(
     # ------------------------------------------------------------------
     if benchmark is not None:
         try:
-            bm = benchmark.reindex(dates, method="ffill").dropna()
+            # pandas 2.0+: reindex().ffill() yerine method= parametresi deprecated
+            bm = benchmark.reindex(dates).ffill().dropna()
             if len(bm) < 10:
                 raise ValueError("Benchmark verisi yetersiz")
+            # Hizalama uyarısı: benchmark strateji tarihlerinin %10'undan fazlasını
+            # kapsayamıyorsa (ffill ile doldurulamayan boşluklar) uyar.
+            if len(bm) < int(n_dates * BM_COVERAGE_WARN_PCT):
+                import warnings
+                warnings.warn(
+                    f"Benchmark {n_dates - len(bm)} tarihte eksik "
+                    f"({len(bm)}/{n_dates} gün eşleşti); "
+                    "benchmark metrikleri kısmi veriyle hesaplanıyor.",
+                    stacklevel=2,
+                )
 
             bm_ret    = bm.pct_change().fillna(0.0).values
             bm_ret    = bm_ret[:n_dates]

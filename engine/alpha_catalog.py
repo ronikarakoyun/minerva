@@ -24,7 +24,11 @@ from .replay_buffer import _tree_to_dict, _tree_from_dict
 CATALOG_PATH = "data/alpha_catalog.json"
 
 # Şema sürümü — yeni alan eklendiğinde artır + _migrate_record güncelle
-CATALOG_SCHEMA_VERSION = 4
+CATALOG_SCHEMA_VERSION = 5
+
+# Node dict formatı sürümü — _tree_to_dict / _tree_from_dict değiştiğinde artır.
+# Kayıtlardaki "ast_schema" bu değerle eşleşmiyorsa yeniden parse edilmeli.
+AST_SCHEMA_VERSION = 1
 
 
 def _migrate_record(r: dict) -> dict:
@@ -49,6 +53,10 @@ def _migrate_record(r: dict) -> dict:
             r["wf"].setdefault("size_corr", None)
         if r.get("overfit") and isinstance(r["overfit"], dict):
             r["overfit"].setdefault("ic_drop_pct", None)
+
+    # v4 → v5: ast_schema eklendi — Node dict formatı versiyonlama
+    if schema < 5:
+        r.setdefault("ast_schema", AST_SCHEMA_VERSION)
 
     r["_schema"] = CATALOG_SCHEMA_VERSION
     return r
@@ -113,6 +121,7 @@ def save_alpha(
     record.update({
         "formula":       formula,
         "ast":           _tree_to_dict(tree),
+        "ast_schema":    AST_SCHEMA_VERSION,       # Node dict format sürümü
         "ic":            round(float(ic), 6),
         "rank_ic":       round(float(rank_ic), 6),
         "adj_ic":        round(float(adj_ic), 6),
@@ -182,8 +191,17 @@ def load_catalog() -> list:
 
 def get_tree(formula: str) -> Optional[Node]:
     """Katalogdan formülün AST'sini geri yükle."""
+    import warnings
     for r in _load_raw():
         if r["formula"] == formula:
+            saved_ast_schema = r.get("ast_schema", 0)
+            if saved_ast_schema != AST_SCHEMA_VERSION:
+                warnings.warn(
+                    f"'{formula}' için kaydedilmiş AST formatı "
+                    f"(ast_schema={saved_ast_schema}) mevcut sürümle "
+                    f"({AST_SCHEMA_VERSION}) uyuşmuyor — yeniden parse gerekebilir.",
+                    stacklevel=2,
+                )
             try:
                 return _tree_from_dict(r["ast"])
             except Exception:

@@ -410,10 +410,10 @@ export default function Workbench() {
 
             {/* Mining trigger + progress */}
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              <Btn variant="primary" full onClick={handleMining} disabled={isMining}>
+              <Btn variant="primary" onClick={handleMining} disabled={isMining}>
                 {isMining
-                  ? `⚡ Evrim çalışıyor… ${Math.round(miningJob.progress * 100)}%`
-                  : "⚡ Evrimsel Döngüyü Başlat (Mining)"}
+                  ? `Çalışıyor… ${Math.round(miningJob.progress * 100)}%`
+                  : "▸ Çalıştır"}
               </Btn>
               {isMining && (
                 <>

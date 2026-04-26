@@ -58,7 +58,15 @@ def _build_factors(idx: pd.DataFrame) -> pd.DataFrame:
         grp = flat.groupby("Ticker")["Pclose"]
 
         price = flat["Pclose"].replace(0, np.nan).clip(lower=1e-6)
-        flat["size"] = np.log(price)
+        # SINIRLILIK: Gerçek market cap = log(Pclose × shares_outstanding).
+        # EOD verisinde shares_outstanding yoksa log(Pclose) proxy olarak kullanılır.
+        # BIST'te ucuz hisse ≠ küçük şirket (ör. lot-split sonrası 0.1₺ hisse).
+        # Veriye "shares_outstanding" eklenirse burası log(price * shares) yapılmalı.
+        if "shares_outstanding" in flat.columns:
+            mktcap = price * flat["shares_outstanding"].replace(0, np.nan).clip(lower=1)
+            flat["size"] = np.log(mktcap)
+        else:
+            flat["size"] = np.log(price)
 
         # Pclose → pct_change → returns; rolling std = volatilite
         # NOT: s = Pclose, s.pct_change() = günlük getiri (çift pct_change YOK)
