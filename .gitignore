@@ -37,6 +37,11 @@ data/alpha_catalog.json
 *.swp
 *.swo
 Thumbs.db
+.obsidian/
+.Rhistory
+
+# Virtual environments
+.venv/
 
 # Jupyter
 .ipynb_checkpoints/

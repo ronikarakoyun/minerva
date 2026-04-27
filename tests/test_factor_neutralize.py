@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from engine.factor_neutralize import (
+from engine.data.factor_neutralize import (
     _rank_norm,
     _bin_demean,
     _build_factors,

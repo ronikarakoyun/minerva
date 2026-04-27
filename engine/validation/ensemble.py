@@ -17,7 +17,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from .backtest_engine import run_pro_backtest
+from ..core.backtest_engine import run_pro_backtest
 
 
 def combine_signals(

@@ -11,7 +11,7 @@ import random
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
-from .alpha_cfg import AlphaCFG, Node
+from ..core.alpha_cfg import AlphaCFG, Node
 
 
 @dataclass

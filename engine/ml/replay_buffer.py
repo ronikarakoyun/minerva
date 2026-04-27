@@ -14,7 +14,7 @@ import random
 from collections import deque
 from typing import Deque, List, Optional, Tuple
 
-from .alpha_cfg import Node
+from ..core.alpha_cfg import Node
 
 Sample = Tuple[Node, float, Optional[List[float]]]
 

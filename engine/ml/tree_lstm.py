@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .alpha_cfg import AlphaCFG, Node
+from ..core.alpha_cfg import AlphaCFG, Node
 
 
 # -----------------------------------------------------------------

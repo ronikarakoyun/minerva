@@ -16,8 +16,8 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from .alpha_cfg import Node
-from .factor_neutralize import neutralize_signal, compute_size_corr
+from ..core.alpha_cfg import Node
+from ..data.factor_neutralize import neutralize_signal, compute_size_corr
 
 
 def _node_complexity(node: Node) -> int:

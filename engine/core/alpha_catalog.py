@@ -19,7 +19,7 @@ from datetime import datetime
 from typing import Optional
 
 from .alpha_cfg import Node
-from .replay_buffer import _tree_to_dict, _tree_from_dict
+from ..ml.replay_buffer import _tree_to_dict, _tree_from_dict
 
 CATALOG_PATH = "data/alpha_catalog.json"
 

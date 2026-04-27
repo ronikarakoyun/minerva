@@ -56,7 +56,7 @@ def get_benchmark() -> Optional[pd.Series]:
 @functools.lru_cache(maxsize=1)
 def get_cfg():
     """AlphaCFG singleton — formül evaluate'i için."""
-    from engine.alpha_cfg import AlphaCFG
+    from engine.core.alpha_cfg import AlphaCFG
 
     return AlphaCFG()
 
@@ -64,10 +64,10 @@ def get_cfg():
 @functools.lru_cache(maxsize=1)
 def get_brain():
     """Tree-LSTM + trainer + buffer (lazy — sadece gerektiğinde yüklenir)."""
-    from engine.alpha_cfg import AlphaCFG
-    from engine.replay_buffer import ReplayBuffer
-    from engine.trainer import TreeLSTMTrainer
-    from engine.tree_lstm import (
+    from engine.core.alpha_cfg import AlphaCFG
+    from engine.ml.replay_buffer import ReplayBuffer
+    from engine.ml.trainer import TreeLSTMTrainer
+    from engine.ml.tree_lstm import (
         PolicyValueNet,
         build_action_vocab,
         build_token_vocab,

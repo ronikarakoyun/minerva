@@ -12,7 +12,7 @@ from fastapi import APIRouter
 from api.deps import get_benchmark, get_cfg, get_market_db, get_split_date
 from api.jobs import registry
 from api.schemas import EvaluateRequest, EvaluateResponse
-from engine.api_helpers import (
+from engine.core.api_helpers import (
     evaluate_ic,
     parse_or_raise,
     prepare_eval_idx,
@@ -441,7 +441,7 @@ class OverfitResponse(BaseModel):
 @router.post("/overfit", response_model=OverfitResponse)
 def overfit(req: OverfitRequest) -> OverfitResponse:
     """Zaman-bazlı overfit validasyonu — train vs test IC degradation."""
-    from engine.alpha_catalog import load_catalog
+    from engine.core.alpha_catalog import load_catalog
 
     cfg = get_cfg()
     db = get_market_db()

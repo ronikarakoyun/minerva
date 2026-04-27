@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from engine.deflated_sharpe import (
+from engine.validation.deflated_sharpe import (
     compute_sharpe_series,
     expected_max_sr_null,
     deflated_sharpe_ratio,

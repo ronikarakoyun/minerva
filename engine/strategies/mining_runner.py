@@ -21,8 +21,8 @@ from typing import Callable, Optional
 import numpy as np
 import pandas as pd
 
-from .alpha_cfg import AlphaCFG, Node
-from .wf_fitness import compute_wf_fitness, make_date_folds, make_purged_date_folds
+from ..core.alpha_cfg import AlphaCFG, Node
+from ..validation.wf_fitness import compute_wf_fitness, make_date_folds, make_purged_date_folds
 
 
 @dataclass

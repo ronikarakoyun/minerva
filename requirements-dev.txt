@@ -1,0 +1,6 @@
+-r requirements.txt
+
+# Dev / test
+pytest>=8.0
+plotly>=5.18       # sadece scripts/ ve eski app.py için
+streamlit>=1.35    # legacy app.py (geçiş sürecinde)

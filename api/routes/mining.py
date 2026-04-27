@@ -15,8 +15,8 @@ from pydantic import BaseModel
 
 from api.deps import get_cfg, get_market_db, get_split_date
 from api.jobs import registry
-from engine.alpha_catalog import save_alpha
-from engine.mining_runner import MiningConfig, run_mining_window
+from engine.core.alpha_catalog import save_alpha
+from engine.strategies.mining_runner import MiningConfig, run_mining_window
 
 logger = logging.getLogger(__name__)
 router = APIRouter()

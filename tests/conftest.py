@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from engine.alpha_cfg import AlphaCFG
+from engine.core.alpha_cfg import AlphaCFG
 
 
 # ─── Sentetik veri üretici ────────────────────────────────────────────────────
