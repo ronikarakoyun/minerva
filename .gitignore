@@ -63,8 +63,8 @@ venv/
 env/
 .env
 
-# Data Files (Büyük veri dosyaları Github'a gitmesin)
-data/
+# Data Files (Büyük veri dosyaları Github'a gitmesin) — sadece top-level /data/
+/data/
 *.parquet
 *.csv
 
