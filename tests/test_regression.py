@@ -23,9 +23,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from engine.alpha_cfg import AlphaCFG
-from engine.wf_fitness import compute_wf_fitness, make_date_folds
-from engine.formula_parser import parse_formula
+from engine.core.alpha_cfg import AlphaCFG
+from engine.validation.wf_fitness import compute_wf_fitness, make_date_folds
+from engine.core.formula_parser import parse_formula
 from tests.conftest import make_synthetic_idx
 
 

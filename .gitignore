@@ -37,6 +37,11 @@ data/alpha_catalog.json
 *.swp
 *.swo
 Thumbs.db
+.obsidian/
+.Rhistory
+
+# Virtual environments
+.venv/
 
 # Jupyter
 .ipynb_checkpoints/
@@ -66,3 +71,8 @@ data/
 # Python Cache
 __pycache__/
 *.pyc
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/tsconfig.tsbuildinfo
+frontend/package-lock.json

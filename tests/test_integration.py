@@ -16,11 +16,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from engine.alpha_cfg import AlphaCFG
-from engine.wf_fitness import compute_wf_fitness, make_date_folds
-from engine.factor_neutralize import build_factors_cache, neutralize_signal
-from engine.triple_barrier import add_triple_barrier_to_idx
-from engine.formula_parser import parse_formula
+from engine.core.alpha_cfg import AlphaCFG
+from engine.validation.wf_fitness import compute_wf_fitness, make_date_folds
+from engine.data.factor_neutralize import build_factors_cache, neutralize_signal
+from engine.data.triple_barrier import add_triple_barrier_to_idx
+from engine.core.formula_parser import parse_formula
 from tests.conftest import make_synthetic_idx, make_synthetic_db
 
 

@@ -21,9 +21,9 @@ import pandas as pd
 import pytest
 import numpy as np
 
-from engine.alpha_cfg import AlphaCFG, Node
-from engine.wf_fitness import _node_complexity, make_date_folds, make_purged_date_folds, compute_wf_fitness
-from engine.formula_parser import parse_formula
+from engine.core.alpha_cfg import AlphaCFG, Node
+from engine.validation.wf_fitness import _node_complexity, make_date_folds, make_purged_date_folds, compute_wf_fitness
+from engine.core.formula_parser import parse_formula
 from tests.conftest import make_synthetic_idx
 
 

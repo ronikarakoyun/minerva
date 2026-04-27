@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from engine.triple_barrier import (
+from engine.data.triple_barrier import (
     compute_triple_barrier_labels,
     add_triple_barrier_to_idx,
     label_stats,

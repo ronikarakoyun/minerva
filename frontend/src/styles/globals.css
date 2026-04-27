@@ -1,0 +1,35 @@
+@import "./tokens.css";
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html, body, #root {
+    height: 100%;
+  }
+  body {
+    background-color: var(--bg-0);
+    color: var(--fg-0);
+    font-family: var(--sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  /* Mock'larda tüm kutular monospace tab'la hizalı kalmalı */
+  code, pre, .mono {
+    font-family: var(--mono);
+  }
+  /* Default scrollbar dark teması */
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: var(--bg-0); }
+  ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--bg-3); }
+}
+
+@layer utilities {
+  /* Mock'taki "dotted" satır ayırıcıları için */
+  .border-dotted-soft {
+    border-style: dotted;
+    border-color: var(--line-soft);
+  }
+}

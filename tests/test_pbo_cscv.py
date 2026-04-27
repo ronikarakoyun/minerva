@@ -19,7 +19,7 @@ import numpy as np
 import pytest
 from math import comb
 
-from engine.pbo_cscv import build_pnl_matrix, cscv_pbo, pbo_verdict
+from engine.validation.pbo_cscv import build_pnl_matrix, cscv_pbo, pbo_verdict
 
 
 def _make_noise_matrix(

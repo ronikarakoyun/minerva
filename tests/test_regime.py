@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from engine.regime import compute_regime, attach_regime_to_index, regime_breakdown, REGIMES
+from engine.data.regime import compute_regime, attach_regime_to_index, regime_breakdown, REGIMES
 
 
 def _make_bench(n: int = 300, freq: str = "B") -> pd.Series:
@@ -216,9 +216,9 @@ class TestWfFitnessRegimeIntegration:
         ve 3 rejim içermeli.
         """
         from tests.conftest import make_synthetic_idx
-        from engine.alpha_cfg import AlphaCFG
-        from engine.wf_fitness import compute_wf_fitness, make_date_folds
-        from engine.formula_parser import parse_formula
+        from engine.core.alpha_cfg import AlphaCFG
+        from engine.validation.wf_fitness import compute_wf_fitness, make_date_folds
+        from engine.core.formula_parser import parse_formula
 
         cfg = AlphaCFG()
         idx = make_synthetic_idx(n_tickers=20, n_days=300, seed=55)
@@ -245,9 +245,9 @@ class TestWfFitnessRegimeIntegration:
     def test_no_regime_none_breakdown(self):
         """regime=None verildiğinde regime_breakdown=None döner."""
         from tests.conftest import make_synthetic_idx
-        from engine.alpha_cfg import AlphaCFG
-        from engine.wf_fitness import compute_wf_fitness, make_date_folds
-        from engine.formula_parser import parse_formula
+        from engine.core.alpha_cfg import AlphaCFG
+        from engine.validation.wf_fitness import compute_wf_fitness, make_date_folds
+        from engine.core.formula_parser import parse_formula
 
         cfg = AlphaCFG()
         idx = make_synthetic_idx(n_tickers=20, n_days=250, seed=66)

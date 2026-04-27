@@ -20,7 +20,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from engine.meta_label import (
+from engine.data.meta_label import (
     build_meta_dataset,
     train_meta_model,
     apply_meta_filter,

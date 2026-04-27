@@ -30,8 +30,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from engine.mining_runner import MiningConfig, MiningResult, run_mining_window
-from engine.ensemble import (
+from engine.strategies.mining_runner import MiningConfig, MiningResult, run_mining_window
+from engine.validation.ensemble import (
     HallOfFame,
     WindowResult,
     combine_signals,
@@ -82,7 +82,7 @@ def _make_signal(n: int = 200, seed: int = 0) -> pd.Series:
 
 def _make_cfg():
     """AlphaCFG küçük grameriyle başlat."""
-    from engine.alpha_cfg import AlphaCFG
+    from engine.core.alpha_cfg import AlphaCFG
     return AlphaCFG()
 
 
