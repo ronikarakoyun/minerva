@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { connectJob } from "../lib/ws";
+import { apiFetch } from "../lib/api";
 import { EvaluateResult, JobEvent } from "../types";
 
 export interface JobState {
@@ -8,10 +9,11 @@ export interface JobState {
   result: EvaluateResult | null;
   error: string | null;
   done: boolean;
+  cancel: () => Promise<void>;
 }
 
 export function useJob(jobId: string | null): JobState {
-  const [state, setState] = useState<JobState>({
+  const [state, setState] = useState<Omit<JobState, "cancel">>({
     progress: 0,
     logs: [],
     result: null,
@@ -41,5 +43,16 @@ export function useJob(jobId: string | null): JobState {
     return () => disconnect();
   }, [jobId]);
 
-  return state;
+  const cancel = useCallback(async () => {
+    if (!jobId) return;
+    try {
+      await apiFetch(`/api/jobs/${jobId}/cancel`, { method: "POST" });
+    } catch {
+      // hata olsa da local state'i done yap
+    }
+    setState((prev) => ({ ...prev, done: true, error: "İptal edildi" }));
+    disconnectRef.current?.();
+  }, [jobId]);
+
+  return { ...state, cancel };
 }

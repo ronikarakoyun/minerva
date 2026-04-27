@@ -32,6 +32,7 @@ class Job:
     error: Optional[str] = None
     log_lines: deque = field(default_factory=lambda: deque(maxlen=500))
     subscribers: list[asyncio.Queue] = field(default_factory=list)
+    cancelled: bool = False
 
     async def publish(self, event: JobEvent) -> None:
         """Subscriber kuyruklarına event yay."""
@@ -58,6 +59,11 @@ class Job:
         self.status = "error"
         self.error = error
         await self.publish(JobEvent(type="error", data=error))
+
+    async def cancel(self) -> None:
+        """Job'ı iptal et — çalışan task bir sonraki kontrol noktasında durur."""
+        self.cancelled = True
+        await self.fail("İptal edildi")
 
 
 class JobRegistry:

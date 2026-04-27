@@ -1,7 +1,11 @@
 import { lazy, Suspense } from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
 
-const AtomsDemo = lazy(() => import("./screens/AtomsDemo"));
+// Dev-only — prod build'e girmesin
+const AtomsDemoLazy = import.meta.env.DEV
+  ? lazy(() => import("./screens/AtomsDemo"))
+  : lazy(() => Promise.resolve({ default: () => null as any }));
+
 const Catalog = lazy(() => import("./screens/Catalog"));
 const Workbench = lazy(() => import("./screens/Workbench"));
 const LLMTrainer = lazy(() => import("./screens/LLMTrainer"));
@@ -22,7 +26,7 @@ export default function App() {
     <Suspense fallback={<Loading />}>
       <Routes>
         <Route path="/" element={<Navigate to="/workbench" replace />} />
-        <Route path="/_atoms" element={<AtomsDemo />} />
+        {import.meta.env.DEV && <Route path="/_atoms" element={<AtomsDemoLazy />} />}
         <Route path="/catalog" element={<Catalog />} />
         <Route path="/workbench" element={<Workbench />} />
         <Route path="/llm-trainer" element={<LLMTrainer />} />

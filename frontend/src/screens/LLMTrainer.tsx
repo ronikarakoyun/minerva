@@ -43,6 +43,7 @@ interface BufferStatus {
 export default function LLMTrainer() {
   const [text, setText] = useState(SAMPLE);
   const [wfFitness, setWfFitness] = useState(false);
+  const [usePolicy, setUsePolicy] = useState(false);
   const [epochs, setEpochs] = useState(5);
   const [results, setResults] = useState<ParseResult[]>([]);
   const [parseLoading, setParseLoading] = useState(false);
@@ -89,7 +90,7 @@ export default function LLMTrainer() {
     try {
       const { job_id } = await apiFetch<{ job_id: string }>("/api/training/run", {
         method: "POST",
-        body: JSON.stringify({ epochs, batch_size: 32, use_policy: false }),
+        body: JSON.stringify({ epochs, batch_size: 32, use_policy: usePolicy }),
       });
       setTrainJobId(job_id);
     } catch (e: any) {
@@ -280,6 +281,12 @@ export default function LLMTrainer() {
                 <Stat label="Embedding dim" value="64" />
                 <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                   <Stepper label="Epoch" value={epochs} onChange={setEpochs} min={1} max={100} />
+                  <Check
+                    label="Policy head"
+                    hint="MCTS visit ile ağırlıkla"
+                    checked={usePolicy}
+                    onChange={setUsePolicy}
+                  />
                   <Btn mono small full onClick={handleTrain} disabled={isTraining || bufferSize < 2}>
                     {isTraining ? `${Math.round(trainJob.progress * 100)}%` : "↺ Eğit"}
                   </Btn>

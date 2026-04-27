@@ -12,18 +12,24 @@ export interface CatalogRecord {
   created_at?: string;
 }
 
+export interface EquityPoint {
+  date: string;
+  equity: number;
+  benchmark?: number;
+}
+
 export interface EvaluateResult {
-  ic: number;
-  rank_ic: number;
-  sharpe: number;
-  ann_ret: number;
-  max_dd: number;
-  turnover: number;
-  dsr: number;
-  equity_curve: number[];
-  drawdown: number[];
-  fold_sharpes: number[];
-  train_split: number;
+  ic: number | null;
+  rank_ic: number | null;
+  sharpe: number | null;
+  annual: number | null;
+  mdd: number | null;
+  net_return: number | null;
+  alpha_ir?: number | null;
+  beta?: number | null;
+  equity_curve: EquityPoint[];
+  n_observations: number | null;
+  fold_sharpes?: number[];
 }
 
 export interface JobEvent {
@@ -37,12 +43,4 @@ export interface JobEvent {
 export interface BacktestRequest {
   formula: string;
   window: "test" | "train" | "all";
-  validations?: {
-    meta_label?: boolean;
-    dsr?: boolean;
-    pbo?: boolean;
-    rolling_wf?: boolean;
-    ensemble?: boolean;
-    time_overfit?: boolean;
-  };
 }

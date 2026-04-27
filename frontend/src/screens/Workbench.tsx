@@ -16,7 +16,7 @@ import { useMeta, formatMetaForChrome } from "../hooks/useMeta";
 import { useJob } from "../hooks/useJob";
 import { apiFetch } from "../lib/api";
 import { WINDOW_MAP, windowToLabel } from "../lib/window";
-import { EvaluateResult } from "../types";
+import { EvaluateResult, EquityPoint } from "../types";
 
 // Operator token coloring
 function colorizeFormula(expr: string): React.ReactNode {
@@ -46,14 +46,6 @@ export default function Workbench() {
   const [filterText, setFilterText] = useState("");
   const [sourceFilter, setSourceFilter] = useState("EVO");
   const [neutralize, setNeutralize] = useState(true);
-  const [validations, setValidations] = useState({
-    meta_label: true,
-    dsr: true,
-    pbo: true,
-    rolling_wf: false,
-    ensemble: false,
-    time_overfit: false,
-  });
 
   // Mining params — stateful
   const [mPopSize, setMPopSize] = useState("300");
@@ -102,7 +94,7 @@ export default function Workbench() {
     try {
       const { job_id } = await apiFetch<{ job_id: string }>("/api/backtest/run", {
         method: "POST",
-        body: JSON.stringify({ formula, window: backtestWindow, validations }),
+        body: JSON.stringify({ formula, window: backtestWindow }),
       });
       setJobId(job_id);
     } catch (e: any) {
@@ -121,7 +113,7 @@ export default function Workbench() {
       const { job_id } = await apiFetch<{ job_id: string }>("/api/mining/start", {
         method: "POST",
         body: JSON.stringify({
-          window: backtestWindow === "all" ? "all" : "train",
+          window: backtestWindow,
           num_gen: parseInt(mPopSize) || 200,
           max_K: parseInt(mMaxK) || 15,
           wf_n_folds: parseInt(mFolds) || 5,
@@ -146,10 +138,20 @@ export default function Workbench() {
   const isRunning = isLaunching || (!!jobId && !jobState.done);
 
   const displayResult: EvaluateResult | null = jobState.result;
-  const equityAlpha = displayResult?.equity_curve ?? [];
-  const equityBench = displayResult?.equity_curve ? [] : [];
-  const ddData = displayResult?.drawdown ?? [];
-  const trainSplit = displayResult?.train_split ?? 0;
+  const equityCurve: EquityPoint[] = displayResult?.equity_curve ?? [];
+  const equityAlpha = equityCurve.map((p) => p.equity);
+  const equityBench = equityCurve.some((p) => p.benchmark != null)
+    ? equityCurve.map((p) => p.benchmark ?? 0)
+    : [];
+  const ddData = equityAlpha.length > 0
+    ? (() => {
+        let peak = equityAlpha[0];
+        return equityAlpha.map((v) => {
+          if (v > peak) peak = v;
+          return peak > 0 ? (v - peak) / peak : 0;
+        });
+      })()
+    : [];
   const foldSharpes = displayResult?.fold_sharpes ?? [];
 
   return (
@@ -417,8 +419,13 @@ export default function Workbench() {
               </Btn>
               {isMining && (
                 <>
-                  <div style={{ height: 3, background: "var(--bg-2)", borderRadius: 2, overflow: "hidden" }}>
-                    <div style={{ width: `${Math.round(miningJob.progress * 100)}%`, height: "100%", background: "var(--accent)", transition: "width 0.3s" }} />
+                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <div style={{ flex: 1, height: 3, background: "var(--bg-2)", borderRadius: 2, overflow: "hidden" }}>
+                      <div style={{ width: `${Math.round(miningJob.progress * 100)}%`, height: "100%", background: "var(--accent)", transition: "width 0.3s" }} />
+                    </div>
+                    <Btn variant="ghost" onClick={miningJob.cancel} style={{ padding: "1px 6px", fontSize: 10 }}>
+                      ✕
+                    </Btn>
                   </div>
                   <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)", maxHeight: 60, overflow: "auto" }}>
                     {miningJob.logs.slice(-3).map((line, i) => (
@@ -439,48 +446,6 @@ export default function Workbench() {
               )}
             </div>
 
-            {/* Validation */}
-            <div>
-              <SectionLabel>DOĞRULAMA</SectionLabel>
-              <div style={{ marginTop: 6, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
-                <Check
-                  label="Meta-Label"
-                  checked={validations.meta_label}
-                  onChange={(v) => setValidations((p) => ({ ...p, meta_label: v }))}
-                  hint="ikincil güven filtresi"
-                />
-                <Check
-                  label="DSR"
-                  checked={validations.dsr}
-                  onChange={(v) => setValidations((p) => ({ ...p, dsr: v }))}
-                  hint="deflated sharpe"
-                />
-                <Check
-                  label="PBO (CSCV)"
-                  checked={validations.pbo}
-                  onChange={(v) => setValidations((p) => ({ ...p, pbo: v }))}
-                  hint="overfit olasılığı"
-                />
-                <Check
-                  label="Rolling WF"
-                  checked={validations.rolling_wf}
-                  onChange={(v) => setValidations((p) => ({ ...p, rolling_wf: v }))}
-                  hint="window=252 step=21"
-                />
-                <Check
-                  label="Ensemble"
-                  checked={validations.ensemble}
-                  onChange={(v) => setValidations((p) => ({ ...p, ensemble: v }))}
-                  hint="çoklu alpha"
-                />
-                <Check
-                  label="Time-based overfit"
-                  checked={validations.time_overfit}
-                  onChange={(v) => setValidations((p) => ({ ...p, time_overfit: v }))}
-                  hint="zaman validasyonu"
-                />
-              </div>
-            </div>
           </div>
         </div>
 
@@ -533,6 +498,11 @@ export default function Workbench() {
                   <span style={{ fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--fg-3)", minWidth: 32 }}>
                     {Math.round(jobState.progress * 100)}%
                   </span>
+                  {isRunning && (
+                    <Btn variant="ghost" onClick={jobState.cancel} style={{ padding: "1px 6px", fontSize: 10 }}>
+                      ✕
+                    </Btn>
+                  )}
                 </div>
                 {jobState.logs.slice(-3).map((line, i) => (
                   <div key={i} style={{ fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--fg-3)" }}>
@@ -551,30 +521,34 @@ export default function Workbench() {
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
               <Stat
                 label="Sharpe (oos)"
-                value={displayResult ? displayResult.sharpe.toFixed(2) : "—"}
-                tone={displayResult && displayResult.sharpe > 1 ? "pos" : undefined}
+                value={displayResult?.sharpe != null ? displayResult.sharpe.toFixed(2) : "—"}
+                tone={displayResult?.sharpe != null && displayResult.sharpe > 1 ? "pos" : undefined}
               />
               <Stat
-                label="DSR"
-                value={displayResult ? displayResult.dsr.toFixed(2) : "—"}
-                hint="p < 0.01"
-                tone={displayResult && displayResult.dsr > 0.5 ? "pos" : undefined}
+                label="Alpha IR"
+                value={displayResult?.alpha_ir != null ? displayResult.alpha_ir.toFixed(2) : "—"}
+                hint="vs benchmark"
+                tone={displayResult?.alpha_ir != null && displayResult.alpha_ir > 0 ? "pos" : undefined}
               />
               <Stat
-                label="Ann. ret"
-                value={displayResult ? `${(displayResult.ann_ret * 100).toFixed(1)}%` : "—"}
-                tone={displayResult && displayResult.ann_ret > 0 ? "pos" : undefined}
+                label="Yıllık Getiri"
+                value={displayResult?.annual != null ? `${displayResult.annual.toFixed(1)}%` : "—"}
+                tone={displayResult?.annual != null && displayResult.annual > 0 ? "pos" : "neg"}
               />
               <Stat
                 label="Max DD"
-                value={displayResult ? `${(displayResult.max_dd * 100).toFixed(1)}%` : "—"}
+                value={displayResult?.mdd != null ? `${displayResult.mdd.toFixed(1)}%` : "—"}
                 tone="neg"
               />
-              <Stat label="IC" value={displayResult ? displayResult.ic.toFixed(3) : "—"} />
               <Stat
-                label="Turnover"
-                value={displayResult ? displayResult.turnover.toFixed(2) : "—"}
-                hint="daily"
+                label="IC"
+                value={displayResult?.ic != null ? displayResult.ic.toFixed(3) : "—"}
+                tone={displayResult?.ic != null && displayResult.ic > 0.005 ? "pos" : undefined}
+              />
+              <Stat
+                label="Beta"
+                value={displayResult?.beta != null ? displayResult.beta.toFixed(3) : "—"}
+                hint="benchmark β"
               />
             </div>
 
@@ -596,7 +570,7 @@ export default function Workbench() {
                   height={140}
                   alpha={equityAlpha}
                   bench={equityBench}
-                  train={trainSplit}
+                  train={0}
                 />
               </div>
             </div>
@@ -648,26 +622,33 @@ export default function Workbench() {
               </div>
             </div>
 
-            {/* PBO */}
-            <div
-              style={{
-                background: "var(--bg-1)",
-                border: "1px solid var(--line-soft)",
-                borderRadius: 2,
-                padding: 10,
-              }}
-            >
-              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-                <span style={{ fontSize: 11, color: "var(--fg-1)" }}>PBO · Backtest Overfit</span>
-                <span style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--pos)" }}>0.18</span>
+            {/* Backtest Studio link */}
+            {displayResult && (
+              <div
+                style={{
+                  background: "var(--bg-1)",
+                  border: "1px solid var(--line-soft)",
+                  borderRadius: 2,
+                  padding: 10,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                }}
+              >
+                <div>
+                  <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-2)" }}>Derin Validasyon</div>
+                  <div style={{ fontFamily: "var(--mono)", fontSize: 9, color: "var(--fg-3)", marginTop: 2 }}>
+                    DSR · PBO · Rolling WF · Ensemble
+                  </div>
+                </div>
+                <Btn
+                  variant="ghost"
+                  onClick={() => navigate(`/backtest-studio?formula=${encodeURIComponent(formula)}`)}
+                >
+                  → Backtest Studio
+                </Btn>
               </div>
-              <div style={{ height: 4, background: "var(--bg-2)", borderRadius: 1, overflow: "hidden" }}>
-                <div style={{ height: "100%", width: "18%", background: "var(--pos)" }} />
-              </div>
-              <div style={{ marginTop: 4, fontFamily: "var(--mono)", fontSize: 9, color: "var(--fg-3)" }}>
-                düşük = sağlıklı · threshold 0.50
-              </div>
-            </div>
+            )}
 
             {(jobState.error || launchError) && !isRunning && (
               <div

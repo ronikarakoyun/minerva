@@ -29,6 +29,18 @@ def get_status(job_id: str) -> JobStatus:
     )
 
 
+@router.post("/{job_id}/cancel")
+async def cancel_job(job_id: str) -> dict[str, str]:
+    """Çalışan bir job'ı iptal et."""
+    job = registry.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job bulunamadı")
+    if job.status not in ("running", "pending"):
+        return {"status": job.status, "message": "Job zaten tamamlandı"}
+    await job.cancel()
+    return {"status": "cancelled", "job_id": job_id}
+
+
 @router.post("/test/echo")
 async def test_echo() -> dict[str, str]:
     """Smoke test — 5 saniye ilerleyen progress'le biten fake job."""

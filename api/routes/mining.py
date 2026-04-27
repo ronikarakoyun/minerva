@@ -63,6 +63,8 @@ async def start_mining(req: MiningRequest) -> MiningStartResponse:
 
             if req.window == "train":
                 db_slice = db[db["Date"] < split].copy()
+            elif req.window == "test":
+                db_slice = db[db["Date"] >= split].copy()
             else:
                 db_slice = db.copy()
 
