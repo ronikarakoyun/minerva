@@ -233,6 +233,43 @@ def save_regime_champion(
     return existing
 
 
+def get_active_champions() -> list[tuple[str, dict]]:
+    """
+    Faz 6: Decay-monitor için aktif şampiyon listesi.
+
+    `regime_champion_for` alanı set olan formülleri döndürür. Her satırda
+    paper trade backtest istatistikleri (`backtest_mean`, `backtest_std`)
+    bekleniyor — yoksa wf_mean_ric / wf_std_ric fallback kullanılır.
+
+    Returns
+    -------
+    list[tuple[formula_id, meta_dict]]
+        meta_dict: {"backtest_mean", "backtest_std", "regime_id", "formula"}
+    """
+    out: list[tuple[str, dict]] = []
+    for r in _load_raw():
+        if r.get("regime_champion_for") is None:
+            continue
+        formula = r.get("formula")
+        if not formula:
+            continue
+        mean = r.get("backtest_mean")
+        std = r.get("backtest_std")
+        if mean is None:
+            mean = r.get("wf_mean_ric")
+        if std is None:
+            std = r.get("wf_std_ric")
+        if mean is None or std is None:
+            continue
+        out.append((formula, {
+            "backtest_mean": float(mean),
+            "backtest_std": float(std),
+            "regime_id": int(r["regime_champion_for"]),
+            "formula": formula,
+        }))
+    return out
+
+
 def get_tree(formula: str) -> Optional[Node]:
     """Katalogdan formülün AST'sini geri yükle."""
     import warnings

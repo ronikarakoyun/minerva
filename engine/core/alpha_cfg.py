@@ -87,9 +87,8 @@ class AlphaCFG:
     }
     # Asimetrik binary: Div, Pow, Sub  (operand sırası anlamlı)
     BINARY_ASYM_OPS = {
-        "Div": lambda x, y: x / y.replace(0, np.nan) if hasattr(y, "replace")
-                              else x / (y if y != 0 else np.nan),
-        "Pow": lambda x, y: np.sign(x) * (x.abs() ** y),
+        "Div": lambda x, y: x / (np.sign(y) * np.maximum(np.abs(y), 1e-6)),
+        "Pow": lambda x, y: np.sign(x) * (np.abs(x).clip(lower=1e-6) ** y),
         "Sub": lambda x, y: x - y,
     }
     # Rolling (time-series): Tablo 6'nın tamamı
