@@ -1,24 +1,33 @@
-"""Singleton servisler — market_db, benchmark, brain.
-
-`@functools.lru_cache(None)` ile her singleton bir kez yüklenir.
-Streamlit `app.py:51-114`'teki cache yapısının FastAPI eşdeğeri.
-"""
+"""Singleton servisler — market_db, benchmark, brain."""
 from __future__ import annotations
 
 import functools
 import os
+import sys
 from typing import Optional
-
 import pandas as pd
 
+# 1. Ana dizini tespit et
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
+# 2. Config.py'yi TAMAMEN İPTAL EDİYORUZ. Yolları doğrudan data/ klasörüne bağlıyoruz.
+DATA_DIR = os.path.join(ROOT_DIR, "data")
+MARKET_DB_PATH = os.path.join(DATA_DIR, "market_db.parquet")
+BM_PARQUET_PATH = os.path.join(DATA_DIR, "bist100.parquet")
+BM_CSV_PATH = os.path.join(DATA_DIR, "bist100.csv")
 
 @functools.lru_cache(maxsize=1)
 def get_market_db() -> pd.DataFrame:
-    """data/market_db.parquet → DataFrame, duplicate (Ticker,Date) temizlendi."""
-    from config import load_paths
+    # Doğrudan data/market_db.parquet yoluna bakar
+    if not os.path.exists(MARKET_DB_PATH):
+        raise FileNotFoundError(
+            f"VERİ BULUNAMADI: {MARKET_DB_PATH}\n"
+            f"Lütfen verilerin Minerva_v3_Studio/data/ klasörü içinde olduğundan emin ol!"
+        )
 
-    paths = load_paths()
-    df = pd.read_parquet(paths["market_db"])
+    df = pd.read_parquet(MARKET_DB_PATH)
     df["Date"] = pd.to_datetime(df["Date"])
     df = df.drop_duplicates(subset=["Ticker", "Date"], keep="first")
     if "Pvwap" not in df.columns:
@@ -28,12 +37,8 @@ def get_market_db() -> pd.DataFrame:
 
 @functools.lru_cache(maxsize=1)
 def get_benchmark() -> Optional[pd.Series]:
-    """data/bist100.{parquet,csv} → Date-indexed close series. Yoksa None."""
-    from config import load_paths
-
-    paths = load_paths()
-    for path in [paths.get("benchmark"), paths.get("bm_csv")]:
-        if not path or not os.path.exists(path):
+    for path in [BM_PARQUET_PATH, BM_CSV_PATH]:
+        if not os.path.exists(path):
             continue
         try:
             if path.endswith(".parquet"):
@@ -55,23 +60,25 @@ def get_benchmark() -> Optional[pd.Series]:
 
 @functools.lru_cache(maxsize=1)
 def get_cfg():
-    """AlphaCFG singleton — formül evaluate'i için."""
-    from engine.core.alpha_cfg import AlphaCFG
-
+    try:
+        from engine.alpha_cfg import AlphaCFG
+    except ModuleNotFoundError:
+        from engine.core.alpha_cfg import AlphaCFG
     return AlphaCFG()
 
 
 @functools.lru_cache(maxsize=1)
 def get_brain():
-    """Tree-LSTM + trainer + buffer (lazy — sadece gerektiğinde yüklenir)."""
-    from engine.core.alpha_cfg import AlphaCFG
-    from engine.ml.replay_buffer import ReplayBuffer
-    from engine.ml.trainer import TreeLSTMTrainer
-    from engine.ml.tree_lstm import (
-        PolicyValueNet,
-        build_action_vocab,
-        build_token_vocab,
-    )
+    try:
+        from engine.alpha_cfg import AlphaCFG
+        from engine.replay_buffer import ReplayBuffer
+        from engine.trainer import TreeLSTMTrainer
+        from engine.tree_lstm import PolicyValueNet, build_action_vocab, build_token_vocab
+    except ModuleNotFoundError:
+        from engine.core.alpha_cfg import AlphaCFG
+        from engine.ml.replay_buffer import ReplayBuffer
+        from engine.ml.trainer import TreeLSTMTrainer
+        from engine.ml.tree_lstm import PolicyValueNet, build_action_vocab, build_token_vocab
 
     cfg = AlphaCFG()
     token_vocab = build_token_vocab(cfg)
@@ -93,7 +100,6 @@ def get_brain():
 
 
 def get_split_date() -> pd.Timestamp:
-    """Default split date: train veri aralığının %70'i (Streamlit default'uyla aynı)."""
     db = get_market_db()
     date_min = pd.to_datetime(db["Date"].min())
     date_max = pd.to_datetime(db["Date"].max())

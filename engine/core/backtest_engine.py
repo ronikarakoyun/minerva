@@ -53,6 +53,8 @@ def run_pro_backtest(
     buy_fee: float = 0.0005,
     sell_fee: float = 0.0015,
     benchmark: "pd.Series | None" = None,
+    risk_cfg=None,
+    slippage_cfg=None,
 ):
     """
     Vektörize TopK-Dropout portföy backtester.
@@ -67,6 +69,13 @@ def run_pro_backtest(
     sell_fee      : Satış komisyon oranı (0.0015 = %0.15)
     benchmark     : (Opsiyonel) Date-indexed pd.Series — BIST100/XU100 kapanış.
                     Verilirse: Excess Return, Alfa IR, Beta hesaplanır.
+    risk_cfg      : (Opsiyonel) engine.risk.position_sizer.RiskConfig.
+                    None → mevcut 1/N pipeline aynen. use_vol_target=True ise
+                    her ticker'a rolling vol-target scale uygulanır.
+    slippage_cfg  : (Opsiyonel) engine.execution.slippage.SlippageConfig.
+                    None / use_dynamic_slippage=False → sabit buy_fee/sell_fee.
+                    use_dynamic_slippage=True → portföydeki her hissede
+                    Almgren-Chriss bps cezası eklenir.
 
     Returns
     -------
@@ -80,6 +89,24 @@ def run_pro_backtest(
     data["Pclose_t1"] = data.groupby("Ticker")["Pclose"].shift(-1)
     data["Pclose_t2"] = data.groupby("Ticker")["Pclose"].shift(-2)
     data["Period_Ret"] = data["Pclose_t2"] / data["Pclose_t1"] - 1
+
+    # ------------------------------------------------------------------
+    # Vol-target scaling (Faz 4.1) — opt-in, default kapalı
+    # ------------------------------------------------------------------
+    if risk_cfg is not None and getattr(risk_cfg, "use_vol_target", False):
+        from engine.risk.position_sizer import apply_vol_target
+
+        # Period_Ret wide pivot için sinyal gerekli değil — ham getiriyi ölçekle
+        ret_wide = data.pivot_table(
+            index="Date", columns="Ticker", values="Period_Ret", aggfunc="first"
+        )
+        scaled_wide = apply_vol_target(ret_wide.fillna(0.0), risk_cfg)
+        # Scaled getirileri flat data'ya geri yaz
+        scaled_flat = scaled_wide.stack(future_stack=True).rename("Period_Ret_Scaled").reset_index()
+        scaled_flat.columns = ["Date", "Ticker", "Period_Ret_Scaled"]
+        data = data.merge(scaled_flat, on=["Date", "Ticker"], how="left")
+        data["Period_Ret"] = data["Period_Ret_Scaled"].fillna(data["Period_Ret"])
+        data = data.drop(columns=["Period_Ret_Scaled"])
 
     # ------------------------------------------------------------------
     # Vectorized prep: (Date × Ticker) pivot matrisleri
@@ -110,6 +137,20 @@ def run_pro_backtest(
 
     sig_arr = sig_piv.to_numpy(dtype=float)   # (D, T) — NaN: sinyal yok
     ret_arr = ret_piv.to_numpy(dtype=float)   # (D, T)
+
+    # Dinamik slipaj matrisi (Faz 5.1) — opt-in
+    slip_arr = None
+    if slippage_cfg is not None and getattr(slippage_cfg, "use_dynamic_slippage", False):
+        from engine.execution.slippage import build_slippage_matrix
+
+        ret_wide_for_slip = data.pivot_table(
+            index="Date", columns="Ticker",
+            values="Pclose", aggfunc="first",
+        ).pct_change()
+        slip_wide = build_slippage_matrix(data, ret_wide_for_slip, slippage_cfg)
+        slip_wide = slip_wide.reindex(index=sig_piv.index, columns=sig_piv.columns)
+        # Birim hacim slipajı bps → oran (× sqrt(traded_pct) backtest döngüsünde)
+        slip_arr = slip_wide.to_numpy(dtype=float) / 1e4   # (D, T) bps→oran
 
     # Tüm tarihlerin argsort'unu TEK numpy çağrısında hesapla
     # NaN → -inf dönüştür (argsort'ta NaN olan hisseler sona düşer)
@@ -170,6 +211,19 @@ def run_pro_backtest(
         size      = int(portfolio.sum())
         buy_cost  = (add_n  / max(size, 1)) * buy_fee
         sell_cost = (drop_n / max(size, 1)) * sell_fee
+
+        # Dinamik slipaj — portföydeki her hissenin birim slip oranı ortalaması.
+        # Birim oran v_traded=1 TL referansıyla hesaplandı; portfolio'daki
+        # her hisse için √(weight) faktörü uygulanır (eşit ağırlık → √(1/size)).
+        if slip_arr is not None and size > 0:
+            unit_slip = slip_arr[di, portfolio]
+            unit_slip = unit_slip[np.isfinite(unit_slip)]
+            if len(unit_slip) > 0:
+                turnover_factor = (add_n + drop_n) / max(size, 1)
+                slip_cost = float(np.mean(unit_slip)) * np.sqrt(1.0 / max(size, 1)) * turnover_factor
+                ret_daily[di] = rets - buy_cost - sell_cost - slip_cost
+                continue
+
         ret_daily[di] = rets - buy_cost - sell_cost
 
     # ------------------------------------------------------------------

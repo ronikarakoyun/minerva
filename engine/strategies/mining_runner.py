@@ -14,8 +14,10 @@ Not: Bu fonksiyon Streamlit'e BAĞIMLI DEĞİL. Progress callback opsiyonel.
 """
 from __future__ import annotations
 
+import json
 import random
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable, Optional
 
 import numpy as np
@@ -23,6 +25,11 @@ import pandas as pd
 
 from ..core.alpha_cfg import AlphaCFG, Node
 from ..validation.wf_fitness import compute_wf_fitness, make_date_folds, make_purged_date_folds
+from ..validation.weighted_fitness import (
+    WeightConfig,
+    compute_regime_weights,
+    compute_weighted_wf_fitness,
+)
 
 
 @dataclass
@@ -43,6 +50,38 @@ class MiningConfig:
     seed: int = 42
     min_mean_ric: float = 0.003   # Kabul eşiği
     min_pos_ratio: float = 0.4
+    # Faz 2 — Rejim-koşullu ağırlıklı fitness
+    use_regime_weighting: bool = False
+    weight_cfg: Optional[WeightConfig] = None
+    prob_df: Optional[pd.DataFrame] = None  # Faz 1 çıktısı (Date × K)
+    # Faz 3 — MCTS arama motoru
+    search_mode: str = "gp"               # {"gp", "mcts"} — default geriye dönük
+    c_puct: float = 1.4                   # PUCT exploration weight
+    mcts_rollouts: int = 16               # value_fn yoksa rollout sayısı
+    mcts_iterations_per_root: int = 50    # her formül için MCTS arama bütçesi
+
+    @classmethod
+    def from_best_params(
+        cls,
+        json_path: "str | Path" = "data/best_params.json",
+        **overrides,
+    ) -> "MiningConfig":
+        """Optuna `best_params.json` çıktısından MiningConfig kur."""
+        with open(json_path) as f:
+            payload = json.load(f)
+        bp = payload["best_params"]
+        kwargs: dict = {
+            "search_mode": "mcts",
+            "max_K": int(bp["max_K"]),
+            "c_puct": float(bp["c_puct"]),
+            "mcts_rollouts": int(bp["mcts_rollouts"]),
+            "lambda_std": float(bp["lambda_std"]),
+            "lambda_cx": float(bp["lambda_cx"]),
+            "use_regime_weighting": True,
+            "weight_cfg": WeightConfig(temperature=float(bp["temperature"])),
+        }
+        kwargs.update(overrides)
+        return cls(**kwargs)
 
 
 @dataclass
@@ -148,19 +187,35 @@ def _run_mining_window_impl(
                 embargo_days=mcfg.wf_embargo,
             )
 
-    # ── Faz 1: Başlangıç havuzu ───────────────────────────────────────
-    n1 = mcfg.num_gen // 2
-    pool: list[Node] = [cfg.generate(mcfg.max_K) for _ in range(n1)]
+    # ── Pool üretimi: GP (default) veya MCTS (Faz 3) ──────────────────
+    if mcfg.search_mode == "mcts":
+        from .mcts import GrammarMCTS
+        prior = {}
+        if seed_trees:
+            for t in seed_trees[:50]:
+                prior[str(t)] = 0.1
+        searcher = GrammarMCTS(
+            cfg, max_K=mcfg.max_K, c_puct=mcfg.c_puct,
+            rollouts=mcfg.mcts_rollouts, subtree_prior=prior,
+        )
+        pool: list[Node] = [
+            searcher.search(iterations=mcfg.mcts_iterations_per_root)
+            for _ in range(mcfg.num_gen)
+        ]
+    else:
+        # ── Faz 1: Başlangıç havuzu ───────────────────────────────────
+        n1 = mcfg.num_gen // 2
+        pool = [cfg.generate(mcfg.max_K) for _ in range(n1)]
 
-    # ── Faz 2: Mutation & Crossover ──────────────────────────────────
-    seed_pool = seed_trees if (seed_trees and len(seed_trees) >= 5) else pool
-    n2 = mcfg.num_gen // 2
-    for _ in range(n2):
-        if random.random() < 0.7 and len(seed_pool) > 1:
-            p1, p2 = random.sample(seed_pool, 2)
-            pool.append(cfg.crossover(p1, p2))
-        else:
-            pool.append(cfg.mutate(random.choice(seed_pool)))
+        # ── Faz 2: Mutation & Crossover ──────────────────────────────
+        seed_pool = seed_trees if (seed_trees and len(seed_trees) >= 5) else pool
+        n2 = mcfg.num_gen // 2
+        for _ in range(n2):
+            if random.random() < 0.7 and len(seed_pool) > 1:
+                p1, p2 = random.sample(seed_pool, 2)
+                pool.append(cfg.crossover(p1, p2))
+            else:
+                pool.append(cfg.mutate(random.choice(seed_pool)))
 
     # ── Faz 3: Değerlendirme ──────────────────────────────────────────
     wf_kwargs = dict(
@@ -172,8 +227,13 @@ def _run_mining_window_impl(
         factor_cache=factor_cache,
         lambda_size=mcfg.lambda_size,
         size_corr_hard_limit=mcfg.size_corr_hard_limit,
-        regime=regime,
     )
+
+    # Faz 2: Rejim-koşullu ağırlık serisi (opsiyonel)
+    regime_weights: Optional[pd.Series] = None
+    use_weighted = mcfg.use_regime_weighting and mcfg.prob_df is not None
+    if use_weighted:
+        regime_weights = compute_regime_weights(mcfg.prob_df, mcfg.weight_cfg)
 
     results: list[MiningResult] = []
     n_pool = len(pool)
@@ -183,7 +243,16 @@ def _run_mining_window_impl(
 
         if mcfg.use_wf_fitness and mining_folds and len(mining_folds) >= 3:
             try:
-                stats = compute_wf_fitness(tree, cfg.evaluate, idx, mining_folds, **wf_kwargs)
+                if use_weighted:
+                    stats = compute_weighted_wf_fitness(
+                        tree, cfg.evaluate, idx, mining_folds,
+                        weights=regime_weights, **wf_kwargs,
+                    )
+                else:
+                    stats = compute_wf_fitness(
+                        tree, cfg.evaluate, idx, mining_folds,
+                        regime=regime, **wf_kwargs,
+                    )
             except Exception:
                 continue
         else:

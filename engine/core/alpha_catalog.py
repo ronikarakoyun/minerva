@@ -189,6 +189,43 @@ def load_catalog() -> list:
     return sorted(records, key=_sort_key, reverse=True)
 
 
+def save_regime_champion(
+    regime_id: int,
+    formula: str,
+    tree: Node,
+    ic: float = 0.0,
+    rank_ic: float = 0.0,
+    adj_ic: float = 0.0,
+) -> dict:
+    """
+    Bir formülü belirtilen rejimin "şampiyonu" olarak işaretle (Faz 5.2).
+
+    Aynı formül zaten kayıtlıysa `regime_champion_for` alanı eklenir; yoksa
+    yeni kayıt açılır. Her rejim için aynı anda tek şampiyon olur — eski
+    kayıtların `regime_champion_for == regime_id` alanı temizlenir.
+    """
+    records = _load_raw()
+
+    # Eski şampiyonu bu rejim için temizle
+    for r in records:
+        if r.get("regime_champion_for") == regime_id and r.get("formula") != formula:
+            r.pop("regime_champion_for", None)
+
+    existing = next((r for r in records if r.get("formula") == formula), None)
+    if existing is None:
+        save_alpha(formula, tree, ic, rank_ic, adj_ic)
+        records = _load_raw()
+        existing = next((r for r in records if r.get("formula") == formula), None)
+
+    if existing is None:
+        return {}
+
+    existing["regime_champion_for"] = int(regime_id)
+    existing["updated_at"] = datetime.now().isoformat()
+    _save_raw(records)
+    return existing
+
+
 def get_tree(formula: str) -> Optional[Node]:
     """Katalogdan formülün AST'sini geri yükle."""
     import warnings
