@@ -180,13 +180,27 @@ def compute_realized_pnl(
     df["date"] = pd.to_datetime(df["date"])
 
     pending_mask = df["exit_px"].isna()
+    n_dates = len(px_pivot.index)
     for i in df.index[pending_mask]:
         row_date = df.at[i, "date"]
         ticker = df.at[i, "ticker"]
-        # exit tarihi: t + hold_days (iş günü)
-        exit_date_idx = px_pivot.index.searchsorted(row_date) + cfg.hold_days
-        if exit_date_idx >= len(px_pivot.index):
-            continue  # henüz fiyat yok
+
+        # entry pozisyonunu bul: row_date dizide olmayabilir (tatil, weekend).
+        # searchsorted(side='left') → row_date'in ekleneceği konumu verir,
+        # bu konum row_date > önceki ve row_date <= sonraki arasındaki konumdur.
+        # row_date tam olarak dizide varsa doğru pozisyonu verir.
+        # Yoksa bir sonraki tarihinin pozisyonunu verir → bir geri git.
+        pos = px_pivot.index.searchsorted(row_date, side="left")
+        if pos >= n_dates:
+            continue  # row_date tüm dizinin ötesinde
+        if px_pivot.index[pos] != row_date:
+            # row_date dizide yok; entry sonraki iş gününde gerçekleşmiş
+            # kabul et — exit için o pozisyonu kullan (hold_days buradan)
+            pass  # pos zaten doğru (bir sonraki iş günü)
+
+        exit_date_idx = pos + cfg.hold_days
+        if exit_date_idx >= n_dates:
+            continue  # exit fiyatı henüz mevcut değil — Cuma+2 = Salı gelmedi
         exit_date = px_pivot.index[exit_date_idx]
         if ticker not in px_pivot.columns:
             continue

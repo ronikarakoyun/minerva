@@ -61,6 +61,10 @@ class RegimeConfig:
     model_path: Path = field(default_factory=lambda: Path("data/regime_hmm.pkl"))
     metadata_path: Path = field(default_factory=lambda: Path("data/regime_metadata.json"))
     plot_path: Path = field(default_factory=lambda: Path("data/regime_plot.png"))
+    # True (default) → sadece Forward algoritması — backtest'te look-ahead yok.
+    # False → Forward-Backward (Smoothed) — daha pürüzsüz ama geçmiş noktaları
+    #         gelecek veriyle hesaplar; yalnızca gerçek zamanlı son gün tahmini için uygun.
+    use_filtered_probs: bool = True
 
 
 FEATURES = ["Log_Return", "Norm_ATR_14", "Volume_Accel", "Choppiness"]
@@ -203,17 +207,63 @@ def compute_probability_vector(
     model: GaussianHMM, features: pd.DataFrame
 ) -> pd.DataFrame:
     """
-    predict_proba çıktısını DataFrame'e döker.
+    Forward-Backward (Smoothed) olasılıklar. Tüm diziyi kullanır.
+
+    ⚠️  Backtest'te look-ahead bias yaratır: t anındaki olasılık, t'den sonraki
+    veriyle hesaplanmış olur. Yalnızca canlı son-gün tahmini için kullanılmalıdır.
+    Backtest için compute_filtered_probability_vector() tercih edilmeli.
+    """
+    probs = model.predict_proba(features.values)
+    cols = [f"regime_{i}" for i in range(probs.shape[1])]
+    return pd.DataFrame(probs, index=features.index, columns=cols)
+
+
+def compute_filtered_probability_vector(
+    model: GaussianHMM, features: pd.DataFrame
+) -> pd.DataFrame:
+    """
+    Sadece Forward (Filtered) olasılıklar — backtest güvenli, look-ahead yok.
+
+    predict_proba() Forward-Backward algoritması kullanır: t noktasındaki
+    olasılık hesaplanırken t+1..T gözlemleri de kullanılır (Smoothed).
+    Bu, backtest'te rejim geçişlerinin "sihirli" önceden bilinmesine yol açar.
+
+    Bu fonksiyon yalnızca Forward pass çalıştırır:
+        α₀ = π ⊙ emit(x₀)
+        αₜ = normalize( A' @ αₜ₋₁ ⊙ emit(xₜ) )
+    Böylece αₜ yalnızca x₀..xₜ gözlemlerini kullanır — causal.
 
     Returns
     -------
     pd.DataFrame
         index = features.index (Date), columns = ["regime_0", ..., "regime_K-1"].
-        Her satırın toplamı 1.0'dır (numerik tolerans 1e-6).
     """
-    probs = model.predict_proba(features.values)
-    cols = [f"regime_{i}" for i in range(probs.shape[1])]
-    return pd.DataFrame(probs, index=features.index, columns=cols)
+    X = features.values
+    T = len(X)
+    K = model.n_components
+
+    # Emission log-olasılıkları: (T, K) — hmmlearn internal, tüm modeller destekler
+    log_emit = model._compute_log_likelihood(X)
+
+    # Numerik taşmayı önlemek: her satırdan max çıkart, sonra exp al
+    log_emit_stable = log_emit - log_emit.max(axis=1, keepdims=True)
+    emit = np.exp(log_emit_stable)  # (T, K) — relative doğru, normalize değil
+
+    A = model.transmat_   # (K, K): A[i, j] = P(j | i)
+    pi = model.startprob_  # (K,)
+
+    alpha = np.empty((T, K), dtype=float)
+    alpha[0] = pi * emit[0]
+    norm = alpha[0].sum()
+    alpha[0] /= norm if norm > 1e-300 else 1.0
+
+    for t in range(1, T):
+        alpha[t] = (A.T @ alpha[t - 1]) * emit[t]
+        norm = alpha[t].sum()
+        alpha[t] /= norm if norm > 1e-300 else 1.0
+
+    cols = [f"regime_{i}" for i in range(K)]
+    return pd.DataFrame(alpha, index=features.index, columns=cols)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -343,7 +393,13 @@ def run_pipeline(cfg: Optional[RegimeConfig] = None) -> pd.DataFrame:
     df = fetch_bist_data(cfg)
     features = compute_features(df, cfg)
     model, best_K, candidates = fit_constrained_hmm(features, cfg)
-    prob_df = compute_probability_vector(model, features)
+    # Backtest güvenli: yalnızca Forward algoritması (look-ahead yok).
+    # Smoothed versiyon (predict_proba) canlı son gün için daha pürüzsüz olsa da
+    # geçmiş noktalar için gelecek veriyi kullanır → backtest eğimi.
+    if cfg.use_filtered_probs:
+        prob_df = compute_filtered_probability_vector(model, features)
+    else:
+        prob_df = compute_probability_vector(model, features)
     raw_returns = np.log(df["Close"] / df["Close"].shift(1)).dropna()
 
     plot_regimes(df["Close"], prob_df, cfg)
