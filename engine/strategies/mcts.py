@@ -61,8 +61,12 @@ class GrammarMCTS:
         b = max(len(parent.children), 1)
         bal = math.sqrt(b / max(b_ref, 1))
         total_N = sum(c.N for c in parent.children)
-        # Warm-start prior bonus (6.3): katalogdaki iyi alt-ağaçlara ek öncelik
-        prior_bonus = self.subtree_prior.get(str(child.state), 0.0)
+        # Warm-start prior bonus (6.3): katalogdaki iyi alt-ağaçlara ek öncelik.
+        # prior_bonus normalize edilmeli: ham değer P aralığını [0,1]'in çok
+        # üstüne taşıyabilir → keşif/sömürü dengesini bozar.
+        raw_bonus = self.subtree_prior.get(str(child.state), 0.0)
+        max_prior = max(self.subtree_prior.values(), default=1.0) or 1.0
+        prior_bonus = raw_bonus / max_prior   # [0, 1] aralığına normalize et
         u = self.c_puct * bal * (child.P + prior_bonus) * math.sqrt(total_N + 1) / (1 + child.N)
         return child.Q + u
 

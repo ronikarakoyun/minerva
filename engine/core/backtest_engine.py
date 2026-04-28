@@ -100,7 +100,9 @@ def run_pro_backtest(
         ret_wide = data.pivot_table(
             index="Date", columns="Ticker", values="Period_Ret", aggfunc="first"
         )
-        scaled_wide = apply_vol_target(ret_wide.fillna(0.0), risk_cfg)
+        # NaN'ları fillna(0) yapmadan önce vol hesaplaması yapılmalı;
+        # IPO günleri 0 getiri olarak sayılırsa vol baskılanır, scale şişer.
+        scaled_wide = apply_vol_target(ret_wide, risk_cfg)
         # Scaled getirileri flat data'ya geri yaz
         scaled_flat = scaled_wide.stack(future_stack=True).rename("Period_Ret_Scaled").reset_index()
         scaled_flat.columns = ["Date", "Ticker", "Period_Ret_Scaled"]
@@ -213,14 +215,15 @@ def run_pro_backtest(
         sell_cost = (drop_n / max(size, 1)) * sell_fee
 
         # Dinamik slipaj — portföydeki her hissenin birim slip oranı ortalaması.
-        # Birim oran v_traded=1 TL referansıyla hesaplandı; portfolio'daki
-        # her hisse için √(weight) faktörü uygulanır (eşit ağırlık → √(1/size)).
+        # build_slippage_matrix unit slip = σ·γ·√(1/ADV) (bps/√TL); burada
+        # v_traded = equity/size (eşit ağırlık) varsayımıyla normalizasyon
+        # zaten ADV içinde. Ekstra √(1/size) çarpımı çift sayar — kaldırıldı.
         if slip_arr is not None and size > 0:
             unit_slip = slip_arr[di, portfolio]
             unit_slip = unit_slip[np.isfinite(unit_slip)]
             if len(unit_slip) > 0:
                 turnover_factor = (add_n + drop_n) / max(size, 1)
-                slip_cost = float(np.mean(unit_slip)) * np.sqrt(1.0 / max(size, 1)) * turnover_factor
+                slip_cost = float(np.mean(unit_slip)) * turnover_factor
                 ret_daily[di] = rets - buy_cost - sell_cost - slip_cost
                 continue
 

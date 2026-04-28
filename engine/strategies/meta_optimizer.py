@@ -173,7 +173,14 @@ def run_meta_optimization(meta_cfg: Optional[MetaOptConfig] = None) -> dict:
         "train_window_days": meta_cfg.train_window_days,
     }
     meta_cfg.output_path.parent.mkdir(parents=True, exist_ok=True)
-    meta_cfg.output_path.write_text(json.dumps(best, indent=2, ensure_ascii=False))
+    lock_path = str(meta_cfg.output_path) + ".lock"
+    import fcntl
+    with open(lock_path, "w") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        try:
+            meta_cfg.output_path.write_text(json.dumps(best, indent=2, ensure_ascii=False))
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
     logger.info("=== DONE — best_value=%.4f ===", best["best_value"])
     logger.info("best_params=%s", best["best_params"])
     logger.info("Saved: %s", meta_cfg.output_path)

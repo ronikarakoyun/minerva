@@ -142,17 +142,13 @@ def estimate_formula_capacity(
     tradable_adv = adv_aligned[tradable_mask]
 
     # Her tarih için minimum ADV → kapasiteyi belirleyen hisse
-    # Günlük kapasite: adv_pct_limit × ADV_TL × portfolio_size (eşit ağırlık)
-    # max_pos_per_ticker = adv_pct * ADV
-    # AUM = portfolio_size × max_pos = portfolio_size × adv_pct × min(ADV_t)
-
-    # Tarih bazlı: her günkü tüm sinyalli hisselerin ADV'sini topla
-    # En kısıtlayıcı: pozisyon başına adv_pct × ADV sınırı, portfolio_size pozisyon
-    # AUM = min(ADV_TL_ticker) × adv_pct × portfolio_size (binding ticker)
-
-    # Daha pratik: günlük toplam kapasite = Σ(adv_pct × ADV_i) over active tickers
-    # Ama plan binding ticker metodunu seçiyor
-    per_ticker_cap = tradable_adv * cfg.adv_pct_limit * cfg.portfolio_size
+    # AUM = N_aktif_pozisyon_o_gün × adv_pct × min(ADV_ticker_o_gün)
+    # N olarak cfg.portfolio_size kullanmak, gerçek aktif pozisyon sayısı
+    # (M < portfolio_size) olduğunda AUM'u portfolio_size/M kat şişirir.
+    # Düzeltme: her (Ticker, Date) satırı için o tarihteki aktif hisse sayısını kullan.
+    per_date_n_active = tradable_adv.groupby(level="Date").transform("count")
+    n_positions = per_date_n_active.clip(upper=cfg.portfolio_size)
+    per_ticker_cap = tradable_adv * cfg.adv_pct_limit * n_positions
 
     max_aum_TL = float(per_ticker_cap.min())
     binding_ticker = str(per_ticker_cap.idxmin()[0]) if len(per_ticker_cap) > 0 else None

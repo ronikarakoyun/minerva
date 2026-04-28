@@ -13,6 +13,7 @@ Her kayıt:
   Her yüklemede mevcut şemaya otomatik taşınır.
   CATALOG_SCHEMA_VERSION artırıldığında _migrate_record güncellenmelidir.
 """
+import fcntl
 import json
 import os
 from datetime import datetime
@@ -76,8 +77,14 @@ def _load_raw() -> list:
 
 def _save_raw(records: list) -> None:
     os.makedirs(os.path.dirname(CATALOG_PATH), exist_ok=True)
-    with open(CATALOG_PATH, "w", encoding="utf-8") as f:
-        json.dump(records, f, ensure_ascii=False, indent=2)
+    lock_path = CATALOG_PATH + ".lock"
+    with open(lock_path, "w") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        try:
+            with open(CATALOG_PATH, "w", encoding="utf-8") as f:
+                json.dump(records, f, ensure_ascii=False, indent=2)
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
 
 
 def save_alpha(
