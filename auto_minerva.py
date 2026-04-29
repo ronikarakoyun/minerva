@@ -23,7 +23,150 @@ from typing import Optional
 import pandas as pd
 from prefect import flow, get_run_logger, task
 
+from engine.notifications import send_telegram
+
 logger = logging.getLogger(__name__)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Telegram hooks (Prefect on_completion / on_failure)
+# ──────────────────────────────────────────────────────────────────────
+def _hook_flow_failed(flow, flow_run, state):
+    """Flow Failed → kritik alarm."""
+    msg = (
+        f"🚨 *MINERVA HATA*\n"
+        f"Flow: `{flow.name}`\n"
+        f"Run: `{flow_run.name}`\n"
+        f"Durum: {state.type.value}\n"
+        f"Mesaj: {state.message or '(boş)'}"
+    )
+    send_telegram(msg, parse_mode="Markdown")
+
+
+def _build_portfolio_report() -> str:
+    """
+    Telegram'a yollanacak günlük portföy raporu.
+
+    İçerik:
+      1. Bugünün portföyü (tüm BUY pozisyonlar)
+      2. Aktif şampiyonlar (hangi formüller çalışıyor)
+      3. Net P&L durumu (bugüne kadarki kapanan trade'ler)
+      4. HMM rejim algısı
+    """
+    import json
+    import pandas as pd
+    from pathlib import Path
+
+    lines: list[str] = []
+
+    # ── Bugünün portföyü ──
+    pt_path = Path("data/paper_trades.parquet")
+    dl_path = Path("data/decisions_log.parquet")
+    if pt_path.exists() and dl_path.exists():
+        pt = pd.read_parquet(pt_path)
+        dl = pd.read_parquet(dl_path)
+        last_date = dl["date"].max()
+        today = dl[dl["date"] == last_date]
+        buys = today[today["action"] == "BUY"].sort_values("target_weight", ascending=False)
+
+        lines.append(f"🟢 *MINERVA RAPORU — {pd.Timestamp(last_date).date()}*")
+        lines.append("")
+        lines.append(f"📊 *Portföy* ({len(buys)} pozisyon)")
+        if len(buys) > 0:
+            for _, r in buys.head(15).iterrows():
+                lines.append(
+                    f"  • `{r.ticker:<6}` w={r.target_weight:.1%}  "
+                    f"slip={r.expected_slip_bps:.1f}bps"
+                )
+            if len(buys) > 15:
+                lines.append(f"  …ve {len(buys) - 15} pozisyon daha")
+        else:
+            lines.append("  (boş)")
+        lines.append("")
+
+        # ── HMM rejim ──
+        if len(today) > 0:
+            top_regime = int(today["hmm_top_regime"].mode().iloc[0])
+            top_p = float(today["hmm_top_p"].mean())
+            lines.append(f"🎯 Baskın rejim: `regime_{top_regime}` (p={top_p:.0%})")
+            lines.append("")
+
+        # ── P&L (kapanmış trade'ler) ──
+        filled = pt[pt["net_pnl_pct"].notna()].copy()
+        if len(filled) > 0:
+            # Günlük portföy getirisi (ağırlıklı)
+            filled["weighted_pnl"] = filled["net_pnl_pct"] * filled["weight"]
+            daily = filled.groupby("date")["weighted_pnl"].sum().sort_index()
+            cum_growth = (1.0 + daily).prod() - 1.0
+            avg_daily = daily.mean()
+            n_days = len(daily)
+            win_rate = (filled["net_pnl_pct"] > 0).mean()
+
+            lines.append(f"💰 *P&L* ({n_days} kapanmış gün)")
+            lines.append(f"  Kümülatif: *{cum_growth:+.2%}*")
+            lines.append(f"  Günlük ort: {avg_daily:+.3%}")
+            lines.append(f"  Win rate: {win_rate:.0%}")
+            lines.append(f"  Son 5 gün:")
+            for d, v in daily.tail(5).items():
+                emoji = "🟢" if v > 0 else "🔴" if v < 0 else "⚪"
+                lines.append(f"    {emoji} {pd.Timestamp(d).date()}: {v:+.3%}")
+        else:
+            lines.append("💰 *P&L*: henüz kapanmış trade yok (t+2 bekleniyor)")
+        lines.append("")
+    else:
+        lines.append("🟢 *MINERVA RAPORU*")
+        lines.append("(paper_trades.parquet veya decisions_log.parquet yok)")
+        lines.append("")
+
+    # ── Aktif şampiyonlar ──
+    cat_path = Path("data/alpha_catalog.json")
+    if cat_path.exists():
+        try:
+            recs = json.loads(cat_path.read_text())
+            champs = sorted(
+                [r for r in recs if r.get("regime_champion_for") is not None],
+                key=lambda r: r["regime_champion_for"],
+            )
+            lines.append(f"🏆 *Şampiyon formüller* ({len(champs)})")
+            for c in champs:
+                rid = c["regime_champion_for"]
+                ic = c.get("ic", 0.0)
+                formula = c["formula"]
+                # Telegram için formülü kısalt
+                if len(formula) > 60:
+                    formula = formula[:57] + "…"
+                lines.append(f"  Rejim {rid}: `{formula}` (ic={ic:.4f})")
+        except Exception as e:
+            lines.append(f"🏆 Şampiyonlar okunamadı: {e}")
+    else:
+        lines.append("🏆 alpha_catalog.json yok")
+
+    return "\n".join(lines)
+
+
+def _hook_morning_completed(task, task_run, state):
+    """morning_execution Completed → detaylı portföy raporu."""
+    try:
+        report = _build_portfolio_report()
+        send_telegram(report, parse_mode="Markdown")
+    except Exception as e:
+        logger.warning("morning_completed hook hatası: %s", e)
+        # Fallback: basit mesaj
+        try:
+            send_telegram(f"🟢 Minerva tamamlandı (rapor üretilemedi: {e})")
+        except Exception:
+            pass
+
+
+def _hook_decay_failed(task, task_run, state):
+    """decay_scan Failed (DECAY: prefix) → şampiyon emekli alarmı."""
+    msg = (
+        f"⚠️ *ALPHA DECAY ALARM*\n"
+        f"Task: `{task.name}`\n"
+        f"Mesaj: {state.message or '(detay yok)'}\n"
+        f"Aksiyon: yeni mining koş, eski şampiyonu değiştir"
+    )
+    send_telegram(msg, parse_mode="Markdown")
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -93,7 +236,7 @@ def task_nightly_mining(db_path: Path, prob_path: Path,
 # ──────────────────────────────────────────────────────────────────────
 # Task 4 — Decay scan (aktif şampiyonlar için)
 # ──────────────────────────────────────────────────────────────────────
-@task(name="decay_scan", retries=1)
+@task(name="decay_scan", retries=1, on_failure=[_hook_decay_failed])
 def task_decay_scan(prob_path: Path) -> dict:
     """
     Tüm aktif şampiyonları decay_monitor üzerinden geçir; en az bir tetik
@@ -131,7 +274,8 @@ def task_decay_scan(prob_path: Path) -> dict:
 # ──────────────────────────────────────────────────────────────────────
 # Task 5 — Sabah icrası: blend + paper log + forensic
 # ──────────────────────────────────────────────────────────────────────
-@task(name="morning_execution", retries=1, timeout_seconds=600)
+@task(name="morning_execution", retries=1, timeout_seconds=600,
+      on_completion=[_hook_morning_completed])
 def task_morning_execution(db_path: Path, prob_path: Path) -> dict:
     """
     Faz 5: Önceki günün exit fill + bugünün blend + paper log + adli log.
@@ -151,7 +295,14 @@ def task_morning_execution(db_path: Path, prob_path: Path) -> dict:
 
     db = pd.read_parquet(db_path)
     prob_df = pd.read_parquet(prob_path)
-    today = pd.Timestamp(prob_df.index[-1])
+
+    # `today` için prob_df ve db'nin kesişiminin son gününü kullan.
+    # prob_df HMM'den (XU100 yfinance) gelir, db market_db'den — son tarihleri farklı olabilir.
+    db_last = pd.Timestamp(db["Date"].max())
+    prob_last = pd.Timestamp(prob_df.index[-1])
+    today = min(db_last, prob_last)
+    log.info("today=%s (db_last=%s, prob_last=%s)",
+             today.date(), db_last.date(), prob_last.date())
 
     # 1) Önceki günün exit fill (t+2)
     pt_cfg = PaperTraderConfig()
@@ -176,11 +327,18 @@ def task_morning_execution(db_path: Path, prob_path: Path) -> dict:
         BlenderConfig(use_blending=True),
         alpha_cfg=alpha_cfg,
     )
-    if today not in weights_df.index:
-        log.warning("today=%s blend çıktısında yok", today)
-        today_weights = pd.Series(dtype=float)
-    else:
-        today_weights = weights_df.loc[today].dropna()
+    # Blend çıktısının gerçek son gününü al (rolling pencere kayıpları olabilir)
+    if len(weights_df) == 0:
+        log.warning("blend çıktısı boş — morning_execution skip")
+        return {"logged": 0, "skipped": True, "reason": "empty_blend"}
+
+    weights_last = pd.Timestamp(weights_df.index[-1])
+    if weights_last < today:
+        log.info("blend son günü %s, today=%s ileride — son günü kullanıyoruz",
+                 weights_last.date(), today.date())
+        today = weights_last
+
+    today_weights = weights_df.loc[today].dropna()
     today_weights = today_weights[today_weights > 0]
 
     # 4) Paper trade log
@@ -214,7 +372,8 @@ def task_morning_execution(db_path: Path, prob_path: Path) -> dict:
 # ──────────────────────────────────────────────────────────────────────
 # FLOW
 # ──────────────────────────────────────────────────────────────────────
-@flow(name="Minerva_Core_Loop", log_prints=True)
+@flow(name="Minerva_Core_Loop", log_prints=True,
+      on_failure=[_hook_flow_failed])
 def run_daily_cycle(
     only_mining_on_weekday: Optional[int] = 4,
     mining_n_trials: int = 50,

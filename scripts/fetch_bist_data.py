@@ -850,38 +850,52 @@ def main():
     # ── Mevcut veriyi yükle ───────────────────────────────────────────────────
     existing = load_existing()
 
-    # Eksik tarih aralığını hesapla
+    # Eksik aralıkları hesapla — hem geriye (existing_min öncesi) hem ileriye (existing_max sonrası)
+    fetch_ranges: list[tuple[str, str]] = []
     if not existing.empty:
-        existing_min = existing["Date"].min()
-        fetch_end = (existing_min - timedelta(days=1)).strftime("%Y-%m-%d")
-        fetch_start = START_DATE
-        if fetch_start >= fetch_end:
-            print(f"\n✅ Veri zaten {START_DATE}'dan itibaren mevcut. Çekilecek yeni veri yok.")
-            print(f"   Mevcut aralık: {existing['Date'].min().date()} → {existing['Date'].max().date()}")
+        existing_min = pd.Timestamp(existing["Date"].min())
+        existing_max = pd.Timestamp(existing["Date"].max())
+
+        # Geriye: START_DATE → existing_min - 1
+        back_end = (existing_min - timedelta(days=1)).strftime("%Y-%m-%d")
+        if START_DATE < back_end:
+            fetch_ranges.append((START_DATE, back_end))
+            print(f"📥 Geriye eksik: {START_DATE} → {back_end}")
+
+        # İleriye: existing_max + 1 → bugün+1 (yfinance end exclusive)
+        fwd_start = (existing_max + timedelta(days=1)).strftime("%Y-%m-%d")
+        fwd_end = (datetime.today() + timedelta(days=1)).strftime("%Y-%m-%d")
+        if fwd_start < fwd_end:
+            fetch_ranges.append((fwd_start, fwd_end))
+            print(f"📥 İleriye eksik: {fwd_start} → {fwd_end}")
+
+        if not fetch_ranges:
+            print(f"\n✅ Veri zaten güncel. Mevcut aralık: {existing_min.date()} → {existing_max.date()}")
             return
-        print(f"\n📥 Eksik dönem çekilecek: {fetch_start} → {fetch_end}")
     else:
-        fetch_start = START_DATE
-        fetch_end   = END_DATE
-        print(f"\n📥 Tüm dönem çekilecek: {fetch_start} → {fetch_end}")
+        fetch_ranges.append((START_DATE, END_DATE))
+        print(f"\n📥 Tüm dönem çekilecek: {START_DATE} → {END_DATE}")
 
     # ── Sembolleri çek ───────────────────────────────────────────────────────
-    # Duplikatları kaldır
     unique_tickers = list(dict.fromkeys(TICKERS))
     new_frames = []
     ok_count = 0
     fail_count = 0
 
-    print(f"\n{len(unique_tickers)} sembol işlenecek...\n")
+    print(f"\n{len(unique_tickers)} sembol × {len(fetch_ranges)} aralık işlenecek...\n")
 
     for i, symbol in enumerate(unique_tickers):
         ticker_clean = symbol.replace(".IS", "")
-        df = fetch_ticker_range(symbol, fetch_start, fetch_end)
-        if df is not None and not df.empty:
-            df = df.reset_index()
-            df["Ticker"] = ticker_clean
-            df = df[["Date", "Ticker", "Popen", "Phigh", "Plow", "Pclose", "Vlot"]]
-            new_frames.append(df)
+        ticker_dfs = []
+        for fetch_start, fetch_end in fetch_ranges:
+            df = fetch_ticker_range(symbol, fetch_start, fetch_end)
+            if df is not None and not df.empty:
+                df = df.reset_index()
+                df["Ticker"] = ticker_clean
+                df = df[["Date", "Ticker", "Popen", "Phigh", "Plow", "Pclose", "Vlot"]]
+                ticker_dfs.append(df)
+        if ticker_dfs:
+            new_frames.append(pd.concat(ticker_dfs, ignore_index=True))
             ok_count += 1
             if (i + 1) % 50 == 0:
                 print(f"  [{i+1}/{len(unique_tickers)}] {ok_count} başarılı, {fail_count} başarısız")

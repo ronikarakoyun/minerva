@@ -237,9 +237,11 @@ def get_active_champions() -> list[tuple[str, dict]]:
     """
     Faz 6: Decay-monitor için aktif şampiyon listesi.
 
-    `regime_champion_for` alanı set olan formülleri döndürür. Her satırda
-    paper trade backtest istatistikleri (`backtest_mean`, `backtest_std`)
-    bekleniyor — yoksa wf_mean_ric / wf_std_ric fallback kullanılır.
+    `regime_champion_for` alanı set olan formülleri döndürür. Mean/std fallback
+    sırası:
+        1) backtest_mean / backtest_std   (paper trade istatistikleri)
+        2) wf_mean_ric / wf_std_ric        (walk-forward fitness)
+        3) ic / 0.005                       (basit ic + tipik BIST std default)
 
     Returns
     -------
@@ -259,6 +261,11 @@ def get_active_champions() -> list[tuple[str, dict]]:
             mean = r.get("wf_mean_ric")
         if std is None:
             std = r.get("wf_std_ric")
+        # Son fallback: ic varsa onu kullan, std için BIST tipik 0.005
+        if mean is None:
+            mean = r.get("ic")
+        if std is None and mean is not None:
+            std = 0.005   # BIST günlük IC tipik dağılımı
         if mean is None or std is None:
             continue
         out.append((formula, {
