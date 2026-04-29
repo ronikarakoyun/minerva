@@ -58,6 +58,23 @@ Thumbs.db
 *.tmp
 /tmp/
 
+# Faz 6 — Prefect lokal state (SQLite + run logs)
+.prefect/
+prefect.db
+*.sqlite
+
+# Faz 6 — Job registry & runtime artifact'lar
+data/jobs.db
+data/decisions_log.parquet
+data/regime_prob_df.parquet
+data/paper_trades.parquet
+data/optuna.db
+data/best_params.json
+data/regime_segments.csv
+data/regime_metadata.json
+data/regime_plot.png
+*.lock
+
 # Virtual Environment
 venv/
 env/
