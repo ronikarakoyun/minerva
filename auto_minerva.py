@@ -110,21 +110,19 @@ def _build_portfolio_report(as_of_date: "Optional[object]" = None) -> str:
                 lines.append(f"  Bugünün gerçek PnL  : (T+2 bekleniyor)")
         lines.append("")
 
-        # ── Açık pozisyonların MtM (mark-to-market) PnL'i ──
+        # ── Açık pozisyonların MtM (mark-to-market) PnL'i + tam liste ──
+        clean = None
         try:
             db = pd.read_parquet("data/market_db.parquet")
             db["Date"] = pd.to_datetime(db["Date"])
             avail_dates = sorted(db["Date"].unique())
-            # Mark-to-market: as_of_date'e kadar olan en son fiyat
             mtm_candidates = [d for d in avail_dates if d <= last_date]
             if mtm_candidates:
                 mtm_date = mtm_candidates[-1]
                 px_today = db[db["Date"] == mtm_date].set_index("Ticker")["Pclose"]
-                # Açık = exit_px NaN ve as_of_date'e kadar açılmış
                 open_pos = pt[(pt["date"] <= last_date) & pt["exit_px"].isna()].copy()
                 open_pos["mtm_px"] = open_pos["ticker"].map(px_today)
                 open_pos = open_pos.dropna(subset=["mtm_px"])
-                # Outlier guard (N10): MtM ratio >5x veya <0.2x → büyük ihtimalle bölünme/bozuk veri
                 ratio = open_pos["mtm_px"] / open_pos["entry_px"]
                 clean = open_pos[(ratio > 0.2) & (ratio < 5.0)].copy()
                 skipped = len(open_pos) - len(clean)
@@ -134,42 +132,43 @@ def _build_portfolio_report(as_of_date: "Optional[object]" = None) -> str:
                     clean["w_unrealized"]     = clean["unrealized_net"] * clean["weight"]
                     mtm_total = clean["w_unrealized"].sum()
                     n_open = len(clean)
-                    win_open = (clean["unrealized_net"] > 0).sum()
-                    lines.append(f"📈 *Açık pozisyon MtM* (mtm_date={pd.Timestamp(mtm_date).date()})")
+                    win_open = int((clean["unrealized_net"] > 0).sum())
+                    avg_unreal = clean["unrealized_net"].mean()
+                    lines.append(f"📈 *Açık pozisyon MtM özeti* (mtm_date={pd.Timestamp(mtm_date).date()})")
                     lines.append(f"  Açık pozisyon : {n_open}  ({win_open} kazanan / {n_open - win_open} kaybeden)")
                     lines.append(f"  Toplam MtM PnL: *{mtm_total:+.3%}*")
-                    avg_unreal = clean["unrealized_net"].mean()
                     lines.append(f"  Pozisyon ort. : {avg_unreal:+.3%}")
                     if skipped > 0:
                         lines.append(f"  ⚠️ {skipped} pozisyon outlier veri nedeniyle hariç tutuldu")
-                    # En iyi/en kötü 3
-                    top3 = clean.nlargest(3, "unrealized_net")[["ticker","entry_px","mtm_px","unrealized_net"]]
-                    bot3 = clean.nsmallest(3, "unrealized_net")[["ticker","entry_px","mtm_px","unrealized_net"]]
-                    lines.append("  En iyi 3:")
-                    for _, r in top3.iterrows():
-                        lines.append(f"    🟢 `{r.ticker:<6}` {r.entry_px:>8.2f}→{r.mtm_px:>8.2f}  {r.unrealized_net:+.2%}")
-                    lines.append("  En kötü 3:")
-                    for _, r in bot3.iterrows():
-                        lines.append(f"    🔴 `{r.ticker:<6}` {r.entry_px:>8.2f}→{r.mtm_px:>8.2f}  {r.unrealized_net:+.2%}")
                 else:
-                    lines.append(f"📈 *Açık pozisyon MtM*: açık pozisyon yok ({skipped} outlier filtrelendi)")
+                    lines.append(f"📈 *Açık pozisyon MtM özeti*: açık pozisyon yok ({skipped} outlier filtrelendi)")
             else:
-                lines.append("📈 *Açık pozisyon MtM*: market_db'de uygun fiyat yok")
+                lines.append("📈 *Açık pozisyon MtM özeti*: market_db'de uygun fiyat yok")
         except Exception as e:
-            lines.append(f"📈 *Açık pozisyon MtM*: hesaplanamadı ({e})")
+            lines.append(f"📈 *Açık pozisyon MtM özeti*: hesaplanamadı ({e})")
         lines.append("")
 
-        lines.append(f"📊 *Portföy* ({len(buys)} pozisyon)")
-        if len(buys) > 0:
-            for _, r in buys.head(15).iterrows():
+        # ── Tam pozisyon listesi (her ticker MtM PnL ile) ──
+        if clean is not None and len(clean) > 0:
+            sorted_pos = clean.sort_values("unrealized_net", ascending=False)
+            lines.append(f"📊 *Tüm açık pozisyonlar* ({len(sorted_pos)})  — entry → mtm  net%")
+            for _, r in sorted_pos.iterrows():
+                emoji = "🟢" if r.unrealized_net > 0 else ("🔴" if r.unrealized_net < 0 else "⚪")
                 lines.append(
-                    f"  • `{r.ticker:<6}` w={r.target_weight:.1%}  "
-                    f"slip={r.expected_slip_bps:.1f}bps"
+                    f"  {emoji} `{r.ticker:<6}` w={r.weight:>5.1%} "
+                    f"{r.entry_px:>9.2f} → {r.mtm_px:>9.2f}  "
+                    f"{r.unrealized_net:+.2%}  slip={r.slippage_bps:.0f}bps"
                 )
-            if len(buys) > 15:
-                lines.append(f"  …ve {len(buys) - 15} pozisyon daha")
         else:
-            lines.append("  (boş)")
+            lines.append(f"📊 *Bugünün portföyü* ({len(buys)} pozisyon)")
+            if len(buys) > 0:
+                for _, r in buys.iterrows():
+                    lines.append(
+                        f"  • `{r.ticker:<6}` w={r.target_weight:.1%}  "
+                        f"slip={r.expected_slip_bps:.1f}bps"
+                    )
+            else:
+                lines.append("  (boş)")
         lines.append("")
 
         # ── HMM rejim ──

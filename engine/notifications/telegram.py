@@ -28,6 +28,16 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+# macOS Python 3.14'te SSL CA bundle eksik kalabiliyor → certifi'ye yönlendir.
+# Sadece env zaten set değilse müdahale et (kullanıcı override edebilsin).
+try:
+    import certifi as _certifi
+    _CA_BUNDLE = _certifi.where()
+    os.environ.setdefault("SSL_CERT_FILE", _CA_BUNDLE)
+    os.environ.setdefault("REQUESTS_CA_BUNDLE", _CA_BUNDLE)
+except ImportError:
+    _CA_BUNDLE = None
+
 # .env dosyasını ilk import'ta yükle (varsa)
 _DOTENV_PATH = Path(".env")
 if _DOTENV_PATH.exists():
@@ -82,23 +92,71 @@ def send_telegram(
     token = os.environ["TELEGRAM_BOT_TOKEN"]
     chat_id = os.environ["TELEGRAM_CHAT_ID"]
 
-    # Telegram 4096 karakter sınırı — uzunsa kes
-    if len(text) > 4000:
-        text = text[:3990] + "\n…(kısaltıldı)"
+    # Telegram 4096 karakter sınırı — uzunsa satır sınırlarında parçala
+    chunks = _split_for_telegram(text, max_len=3900)
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-        "disable_web_page_preview": disable_web_page_preview,
-    }
-    if parse_mode:
-        payload["parse_mode"] = parse_mode
+    all_ok = True
+    for i, chunk in enumerate(chunks):
+        suffix = ""
+        if len(chunks) > 1:
+            suffix = f"\n\n— ({i + 1}/{len(chunks)}) —"
 
-    try:
-        r = requests.post(url, json=payload, timeout=timeout)
-        r.raise_for_status()
-        return True
-    except requests.RequestException as e:
-        logger.warning("Telegram gönderim hatası: %s", e)
-        return False
+        def _post(body_text: str, mode: Optional[str]):
+            payload = {
+                "chat_id": chat_id,
+                "text": body_text,
+                "disable_web_page_preview": disable_web_page_preview,
+            }
+            if mode:
+                payload["parse_mode"] = mode
+            return requests.post(url, json=payload, timeout=timeout,
+                                 verify=_CA_BUNDLE if _CA_BUNDLE else True)
+
+        try:
+            r = _post(chunk + suffix, parse_mode)
+            # Markdown parse hatası (400) → plain text fallback
+            if r.status_code == 400 and parse_mode:
+                logger.info("Telegram Markdown reddedildi, plain-text fallback (chunk %d/%d)",
+                            i + 1, len(chunks))
+                stripped = _strip_markdown(chunk) + suffix
+                r = _post(stripped, None)
+            r.raise_for_status()
+        except requests.RequestException as e:
+            logger.warning("Telegram gönderim hatası (chunk %d/%d): %s",
+                           i + 1, len(chunks), e)
+            all_ok = False
+    return all_ok
+
+
+def _strip_markdown(text: str) -> str:
+    """Telegram Markdown reddettiğinde plain'e düşmek için işaretleri kaldır."""
+    import re as _re
+    text = _re.sub(r"`([^`\n]*)`", r"\1", text)        # `code` → code
+    text = _re.sub(r"\*([^\*\n]+)\*", r"\1", text)     # *bold* → bold
+    text = _re.sub(r"_([^_\n]+)_", r"\1", text)        # _italic_ → italic
+    return text
+
+
+def _split_for_telegram(text: str, max_len: int = 3900) -> list[str]:
+    """
+    Mesajı satır sınırlarında parçala (Markdown bütünlüğü için).
+    4096 karakter Telegram limitini aşan rapor için kullanılır.
+    """
+    if len(text) <= max_len:
+        return [text]
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+    for line in text.split("\n"):
+        # +1 ekleme: \n için
+        if current_len + len(line) + 1 > max_len and current:
+            chunks.append("\n".join(current))
+            current = [line]
+            current_len = len(line) + 1
+        else:
+            current.append(line)
+            current_len += len(line) + 1
+    if current:
+        chunks.append("\n".join(current))
+    return chunks
