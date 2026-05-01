@@ -77,7 +77,7 @@ def _load_prob_df(pkl_path: Path) -> pd.DataFrame:
     )
     cfg = RegimeConfig(model_path=pkl_path)
     df = fetch_bist_data(cfg)
-    features = compute_features(df, cfg)
+    features, _scaler = compute_features(df, cfg)  # N6: returns (features, scaler) tuple
     model = joblib.load(pkl_path)
     return compute_probability_vector(model, features)
 
