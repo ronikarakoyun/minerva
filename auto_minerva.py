@@ -51,15 +51,20 @@ def _hook_flow_failed(flow, flow_run, state):
     send_telegram(msg, parse_mode="Markdown")
 
 
-def _build_portfolio_report() -> str:
+def _build_portfolio_report(as_of_date: "Optional[object]" = None) -> str:
     """
     Telegram'a yollanacak günlük portföy raporu.
 
+    Parameters
+    ----------
+    as_of_date : pd.Timestamp | str | None
+        Rapor hangi tarih için üretilecek. None → decisions_log'un son tarihi.
+
     İçerik:
-      1. Bugünün portföyü (tüm BUY pozisyonlar)
-      2. Aktif şampiyonlar (hangi formüller çalışıyor)
-      3. Net P&L durumu (bugüne kadarki kapanan trade'ler)
-      4. HMM rejim algısı
+      1. Günün hareketi (yeni açılan / kapanan / güncel)
+      2. Açık pozisyonların MtM (mark-to-market) PnL'i
+      3. Kapanmış trade'lerin kümülatif PnL'i
+      4. Bugünün portföyü, baskın rejim, aktif şampiyonlar
     """
     import json
     import pandas as pd
@@ -73,12 +78,87 @@ def _build_portfolio_report() -> str:
     if pt_path.exists() and dl_path.exists():
         pt = pd.read_parquet(pt_path)
         dl = pd.read_parquet(dl_path)
-        last_date = dl["date"].max()
+        pt["date"] = pd.to_datetime(pt["date"])
+        dl["date"] = pd.to_datetime(dl["date"])
+
+        if as_of_date is None:
+            last_date = dl["date"].max()
+        else:
+            last_date = pd.Timestamp(as_of_date)
         today = dl[dl["date"] == last_date]
         buys = today[today["action"] == "BUY"].sort_values("target_weight", ascending=False)
 
         lines.append(f"🟢 *MINERVA RAPORU — {pd.Timestamp(last_date).date()}*")
         lines.append("")
+
+        # ── Günün hareketi ──
+        today_pt = pt[pt["date"] == last_date]
+        today_closed = today_pt[today_pt["net_pnl_pct"].notna()]
+        today_open = today_pt[today_pt["net_pnl_pct"].isna()]
+        lines.append("📅 *Günün hareketi*")
+        lines.append(f"  Yeni açılan pozisyon: {len(today_open)}")
+        lines.append(f"  Bugün kapanan trade : {len(today_closed)}")
+        if len(today_closed) > 0:
+            today_pnl = (today_closed["net_pnl_pct"] * today_closed["weight"]).sum()
+            today_winrate = (today_closed["net_pnl_pct"] > 0).mean()
+            lines.append(f"  Bugünün gerçek PnL  : *{today_pnl:+.3%}*  (winrate {today_winrate:.0%})")
+        else:
+            try:
+                expected_exit = (last_date + pd.tseries.offsets.BDay(2)).date()
+                lines.append(f"  Bugünün gerçek PnL  : (T+2 bekleniyor → ~{expected_exit})")
+            except Exception:
+                lines.append(f"  Bugünün gerçek PnL  : (T+2 bekleniyor)")
+        lines.append("")
+
+        # ── Açık pozisyonların MtM (mark-to-market) PnL'i ──
+        try:
+            db = pd.read_parquet("data/market_db.parquet")
+            db["Date"] = pd.to_datetime(db["Date"])
+            avail_dates = sorted(db["Date"].unique())
+            # Mark-to-market: as_of_date'e kadar olan en son fiyat
+            mtm_candidates = [d for d in avail_dates if d <= last_date]
+            if mtm_candidates:
+                mtm_date = mtm_candidates[-1]
+                px_today = db[db["Date"] == mtm_date].set_index("Ticker")["Pclose"]
+                # Açık = exit_px NaN ve as_of_date'e kadar açılmış
+                open_pos = pt[(pt["date"] <= last_date) & pt["exit_px"].isna()].copy()
+                open_pos["mtm_px"] = open_pos["ticker"].map(px_today)
+                open_pos = open_pos.dropna(subset=["mtm_px"])
+                # Outlier guard (N10): MtM ratio >5x veya <0.2x → büyük ihtimalle bölünme/bozuk veri
+                ratio = open_pos["mtm_px"] / open_pos["entry_px"]
+                clean = open_pos[(ratio > 0.2) & (ratio < 5.0)].copy()
+                skipped = len(open_pos) - len(clean)
+                if len(clean) > 0:
+                    clean["unrealized_gross"] = clean["mtm_px"] / clean["entry_px"] - 1.0
+                    clean["unrealized_net"]   = clean["unrealized_gross"] - clean["slippage_bps"] / 1e4
+                    clean["w_unrealized"]     = clean["unrealized_net"] * clean["weight"]
+                    mtm_total = clean["w_unrealized"].sum()
+                    n_open = len(clean)
+                    win_open = (clean["unrealized_net"] > 0).sum()
+                    lines.append(f"📈 *Açık pozisyon MtM* (mtm_date={pd.Timestamp(mtm_date).date()})")
+                    lines.append(f"  Açık pozisyon : {n_open}  ({win_open} kazanan / {n_open - win_open} kaybeden)")
+                    lines.append(f"  Toplam MtM PnL: *{mtm_total:+.3%}*")
+                    avg_unreal = clean["unrealized_net"].mean()
+                    lines.append(f"  Pozisyon ort. : {avg_unreal:+.3%}")
+                    if skipped > 0:
+                        lines.append(f"  ⚠️ {skipped} pozisyon outlier veri nedeniyle hariç tutuldu")
+                    # En iyi/en kötü 3
+                    top3 = clean.nlargest(3, "unrealized_net")[["ticker","entry_px","mtm_px","unrealized_net"]]
+                    bot3 = clean.nsmallest(3, "unrealized_net")[["ticker","entry_px","mtm_px","unrealized_net"]]
+                    lines.append("  En iyi 3:")
+                    for _, r in top3.iterrows():
+                        lines.append(f"    🟢 `{r.ticker:<6}` {r.entry_px:>8.2f}→{r.mtm_px:>8.2f}  {r.unrealized_net:+.2%}")
+                    lines.append("  En kötü 3:")
+                    for _, r in bot3.iterrows():
+                        lines.append(f"    🔴 `{r.ticker:<6}` {r.entry_px:>8.2f}→{r.mtm_px:>8.2f}  {r.unrealized_net:+.2%}")
+                else:
+                    lines.append(f"📈 *Açık pozisyon MtM*: açık pozisyon yok ({skipped} outlier filtrelendi)")
+            else:
+                lines.append("📈 *Açık pozisyon MtM*: market_db'de uygun fiyat yok")
+        except Exception as e:
+            lines.append(f"📈 *Açık pozisyon MtM*: hesaplanamadı ({e})")
+        lines.append("")
+
         lines.append(f"📊 *Portföy* ({len(buys)} pozisyon)")
         if len(buys) > 0:
             for _, r in buys.head(15).iterrows():
@@ -99,10 +179,9 @@ def _build_portfolio_report() -> str:
             lines.append(f"🎯 Baskın rejim: `regime_{top_regime}` (p={top_p:.0%})")
             lines.append("")
 
-        # ── P&L (kapanmış trade'ler) ──
-        filled = pt[pt["net_pnl_pct"].notna()].copy()
+        # ── Kümülatif P&L (geçmişte kapanmış trade'ler) ──
+        filled = pt[(pt["date"] <= last_date) & pt["net_pnl_pct"].notna()].copy()
         if len(filled) > 0:
-            # Günlük portföy getirisi (ağırlıklı)
             filled["weighted_pnl"] = filled["net_pnl_pct"] * filled["weight"]
             daily = filled.groupby("date")["weighted_pnl"].sum().sort_index()
             cum_growth = (1.0 + daily).prod() - 1.0
@@ -110,16 +189,16 @@ def _build_portfolio_report() -> str:
             n_days = len(daily)
             win_rate = (filled["net_pnl_pct"] > 0).mean()
 
-            lines.append(f"💰 *P&L* ({n_days} kapanmış gün)")
-            lines.append(f"  Kümülatif: *{cum_growth:+.2%}*")
+            lines.append(f"💰 *Kümülatif P&L* ({n_days} kapanmış gün)")
+            lines.append(f"  Kümülatif : *{cum_growth:+.2%}*")
             lines.append(f"  Günlük ort: {avg_daily:+.3%}")
-            lines.append(f"  Win rate: {win_rate:.0%}")
-            lines.append(f"  Son 5 gün:")
+            lines.append(f"  Win rate  : {win_rate:.0%}")
+            lines.append(f"  Son 5 gün :")
             for d, v in daily.tail(5).items():
                 emoji = "🟢" if v > 0 else "🔴" if v < 0 else "⚪"
                 lines.append(f"    {emoji} {pd.Timestamp(d).date()}: {v:+.3%}")
         else:
-            lines.append("💰 *P&L*: henüz kapanmış trade yok (t+2 bekleniyor)")
+            lines.append("💰 *Kümülatif P&L*: henüz kapanmış trade yok (T+2 bekleniyor)")
         lines.append("")
     else:
         lines.append("🟢 *MINERVA RAPORU*")
