@@ -15,16 +15,165 @@ serisi yeterli uzunluğa (paper_window_days) ulaşınca decay testine sokulur.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
+from datetime import timezone, datetime as _dt
 from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
 
+import logging
+
 from engine.execution.slippage import SlippageConfig, compute_slippage_bps
 from engine.risk.capacity import CapacityConfig, compute_adv
 from engine.risk.position_sizer import compute_asset_vol
+
+_log = logging.getLogger(__name__)
+
+_TZ_IST = ZoneInfo("Europe/Istanbul")
+
+# N51: Pre-trade slippage cap env'den okunabilir (varsayılan 200 bps).
+SLIPPAGE_CAP_BPS: float = float(os.getenv("SLIPPAGE_CAP_BPS", "200.0"))
+
+# ── Kill-switch dosyası ────────────────────────────────────────────────
+# Eğer bu dosya varsa tüm yeni paper-trade kararları engellenir.
+_KILL_SWITCH_PATH: Path = Path("data/.kill_switch")
+# Günlük maksimum kayıp eşiği (portföy ağırlıklı PnL) — N26
+DAILY_LOSS_LIMIT: float = -0.03   # -%3
+# N27: Kümülatif drawdown eşiği — bu değeri aşınca kill-switch aktif edilir
+CUMULATIVE_DD_LIMIT: float = -0.10  # -%10
+
+
+# N25: Kill-switch dosyası bu süre sonra otomatik süresi dolar (24h TTL).
+_KILL_SWITCH_TTL_HOURS: float = float(os.getenv("KILL_SWITCH_TTL_HOURS", "24"))
+
+
+def is_kill_switch_active() -> bool:
+    """
+    Kill-switch dosyası varsa True döner.
+
+    N25: activated_at alanındaki zaman damgası TTL saatinden eski ise dosyayı
+    siler ve False döner (otomatik TTL süresi dolması).
+    """
+    if not _KILL_SWITCH_PATH.exists():
+        return False
+    try:
+        import json as _json
+        with open(_KILL_SWITCH_PATH) as f:
+            data = _json.load(f)
+        activated_at_str = data.get("activated_at")
+        if activated_at_str:
+            activated_at = _dt.fromisoformat(activated_at_str)
+            if activated_at.tzinfo is None:
+                activated_at = activated_at.replace(tzinfo=timezone.utc)
+            age_hours = (_dt.now(timezone.utc) - activated_at).total_seconds() / 3600
+            if age_hours > _KILL_SWITCH_TTL_HOURS:
+                _KILL_SWITCH_PATH.unlink(missing_ok=True)
+                _log.warning(
+                    "Kill-switch TTL (%.0fh) sona erdi — otomatik devre dışı bırakıldı",
+                    _KILL_SWITCH_TTL_HOURS,
+                )
+                return False
+    except Exception:
+        pass  # Okuma hatası → güvenli taraf → aktif say
+    return True
+
+
+def activate_kill_switch(reason: str = "") -> None:
+    """Kill-switch'i etkinleştir — yeni trade'leri engelle."""
+    import json as _json
+    _KILL_SWITCH_PATH.parent.mkdir(parents=True, exist_ok=True)
+    # N54: pd.Timestamp.utcnow() deprecated → datetime.now(timezone.utc)
+    with open(_KILL_SWITCH_PATH, "w") as f:
+        _json.dump({"reason": reason, "activated_at": _dt.now(timezone.utc).isoformat()}, f)
+    _log.critical("KILL_SWITCH AKTİF: %s", reason)
+
+
+def deactivate_kill_switch() -> None:
+    """Kill-switch'i manuel olarak devre dışı bırak."""
+    if _KILL_SWITCH_PATH.exists():
+        _KILL_SWITCH_PATH.unlink()
+        _log.info("Kill-switch devre dışı bırakıldı")
+
+
+def check_daily_loss_limit(cfg: Optional[PaperTraderConfig] = None) -> bool:
+    """
+    Günlük ağırlıklı PnL toplamı DAILY_LOSS_LIMIT'in altındaysa kill-switch etkinleştirir.
+
+    N26: TZ-aware — İstanbul saatiyle "bugün" belirlenir.
+
+    Returns
+    -------
+    bool
+        True → limit aşılmadı (trade devam edebilir).
+        False → limit aşıldı, kill-switch etkinleştirildi.
+    """
+    cfg = cfg or PaperTraderConfig()
+    df = _load_existing(cfg.output_path)
+    if len(df) == 0:
+        return True
+
+    df["date"] = pd.to_datetime(df["date"])
+    # N26: İstanbul saat dilimiyle bugünün tarihini belirle (UTC kayması önlenir)
+    today_ist = _dt.now(_TZ_IST).date()
+    today = pd.Timestamp(today_ist)
+    today_df = df[df["date"] == today].dropna(subset=["net_pnl_pct"])
+    if len(today_df) == 0:
+        return True
+
+    daily_pnl = float((today_df["net_pnl_pct"] * today_df["weight"]).sum())
+    if daily_pnl < DAILY_LOSS_LIMIT:
+        reason = f"Günlük kayıp eşiği aşıldı: {daily_pnl:.3%} < {DAILY_LOSS_LIMIT:.1%}"
+        activate_kill_switch(reason)
+        return False
+    return True
+
+
+def check_cumulative_drawdown(cfg: Optional[PaperTraderConfig] = None) -> bool:
+    """
+    N27: Kümülatif drawdown kontrolü.
+
+    Tüm geçmiş paper trade PnL serisindeki maksimum drawdown CUMULATIVE_DD_LIMIT'i
+    aşarsa kill-switch etkinleştirilir.
+
+    Drawdown: running_max_equity - current_equity
+
+    Returns
+    -------
+    bool
+        True → limit aşılmadı.
+        False → drawdown aşıldı, kill-switch etkinleştirildi.
+    """
+    cfg = cfg or PaperTraderConfig()
+    df = _load_existing(cfg.output_path)
+    if len(df) == 0:
+        return True
+
+    df = df.dropna(subset=["net_pnl_pct"])
+    if len(df) == 0:
+        return True
+
+    df["date"] = pd.to_datetime(df["date"])
+    # Günlük portföy ağırlıklı PnL → kümülatif equity eğrisi
+    daily = (
+        df.assign(wpnl=df["net_pnl_pct"] * df["weight"])
+        .groupby("date")["wpnl"].sum()
+        .sort_index()
+    )
+    equity = (1 + daily).cumprod()
+    running_max = equity.cummax()
+    drawdown = (equity - running_max) / running_max
+    max_dd = float(drawdown.min())
+
+    if max_dd < CUMULATIVE_DD_LIMIT:
+        reason = f"Kümülatif drawdown eşiği aşıldı: {max_dd:.2%} < {CUMULATIVE_DD_LIMIT:.0%}"
+        activate_kill_switch(reason)
+        _log.critical("DRAWDOWN LIMIT: %s", reason)
+        return False
+    return True
 
 
 PAPER_TRADE_COLUMNS = [
@@ -86,6 +235,21 @@ def log_daily_decisions(
     cfg = cfg or PaperTraderConfig()
     slip_cfg = slippage_cfg or SlippageConfig()
 
+    # Kill-switch kontrolü
+    if is_kill_switch_active():
+        _log.critical("KILL_SWITCH aktif — paper trade kararları engellendi")
+        return 0
+
+    # Günlük kayıp limiti kontrolü
+    if not check_daily_loss_limit(cfg):
+        _log.critical("Günlük kayıp limiti aşıldı — kill-switch etkinleştirildi, trade durdu")
+        return 0
+
+    # N27: Kümülatif drawdown kontrolü
+    if not check_cumulative_drawdown(cfg):
+        _log.critical("Kümülatif drawdown limiti aşıldı — kill-switch etkinleştirildi, trade durdu")
+        return 0
+
     # Sadece pozitif ağırlıklı pozisyonlar
     active = target_weights[target_weights > 0].dropna()
     if len(active) == 0:
@@ -130,6 +294,14 @@ def log_daily_decisions(
             adv_TL = np.nan
 
         slip_bps = compute_slippage_bps(v_traded, asset_vol, adv_TL, slip_cfg)
+
+        # Pre-trade slippage cap: aşırı maliyetli işlemleri atla
+        if np.isfinite(slip_bps) and slip_bps > SLIPPAGE_CAP_BPS:
+            _log.warning(
+                "SLIP_CAP: %s beklenen slipaj %.1f bps > %.0f bps eşiği — atlanıyor",
+                ticker, slip_bps, SLIPPAGE_CAP_BPS,
+            )
+            continue
 
         rows.append({
             "date":          pd.Timestamp(date),
@@ -253,6 +425,14 @@ def feed_decay_monitor(
         return {"triggered": False, "n_observations": 0, "reason": "no_paper_trades"}
 
     df = df[df["formula_id"] == formula_id].copy()
+    # Pencere sonu kayıtları hariç tut: hold_days kadar yakın olan girişler
+    # hiçbir zaman exit_px alamaz (veri bitmeden önce açılmış pozisyonlar).
+    # Bu kayıtlar decay monitor'a beslenirse false alarm tetikleyebilir.
+    if len(df) > 0:
+        df["date"] = pd.to_datetime(df["date"])
+        max_date = df["date"].max()
+        cutoff = max_date - pd.Timedelta(days=cfg.hold_days)
+        df = df[df["date"] <= cutoff]
     df = df.dropna(subset=["net_pnl_pct"])
     if len(df) < decay_cfg.consecutive_days:
         return {

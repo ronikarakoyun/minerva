@@ -35,26 +35,44 @@ class RiskConfig:
     max_scale: float = 3.0              # leverage tavanı
 
 
-def compute_asset_vol(returns: pd.Series, window: int = 20) -> pd.Series:
+def compute_asset_vol(
+    returns: pd.Series,
+    window: int = 20,
+    fast_span: int = 5,
+    blend: bool = True,
+) -> pd.Series:
     """
     Günlük getiri serisinden rolling realized volatility (annualized).
+
+    N21: EWMA fast/slow blend — yüksek vol döneminde pozisyon uzun süre
+    düşük kalmasını önler. fast_span (5g) EWMA ile rolling std (window=20g)
+    ortalaması alınır: blend = (fast + slow) / 2.
 
     Parameters
     ----------
     returns : pd.Series
         Günlük log/simple getiriler. NaN'lara karşı dayanıklı.
     window : int
-        Rolling window (default 20 iş günü).
+        Yavaş rolling std window (default 20 iş günü).
+    fast_span : int
+        Hızlı EWMA span (default 5 iş günü).
+    blend : bool
+        True (N21) → fast/slow blend; False → sadece rolling std.
 
     Returns
     -------
     pd.Series
-        Annualized vol (= rolling_std × √252). Aynı index, NaN bilenmemiş.
+        Annualized vol. Aynı index, NaN bilenmemiş.
     """
     if not isinstance(returns, pd.Series):
         returns = pd.Series(returns)
-    rolling_std = returns.rolling(window, min_periods=max(2, window // 4)).std()
-    return rolling_std * np.sqrt(ANNUALIZATION)
+    slow_std = returns.rolling(window, min_periods=max(2, window // 4)).std()
+    if blend:
+        fast_ewm = returns.ewm(span=fast_span, min_periods=max(2, fast_span // 2)).std()
+        # N21: blend = max(fast, slow) — vol spike'larını anında yakala
+        blended_std = pd.concat([slow_std, fast_ewm], axis=1).max(axis=1)
+        return blended_std * np.sqrt(ANNUALIZATION)
+    return slow_std * np.sqrt(ANNUALIZATION)
 
 
 def compute_position_scale(

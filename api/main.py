@@ -16,10 +16,27 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
-from api.routes import backtest, catalog, formulas, jobs as jobs_routes, mining, training
+try:
+    from slowapi import Limiter, _rate_limit_exceeded_handler
+    from slowapi.errors import RateLimitExceeded
+    from slowapi.middleware import SlowAPIMiddleware
+    from slowapi.util import get_remote_address
+    _SLOWAPI = True
+except ImportError:
+    _SLOWAPI = False
+
+# .env dosyası varsa yükle
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+from api.routes import backtest, catalog, formulas, jobs as jobs_routes, mining, system, training
 
 app = FastAPI(
     title="Minerva v3 API",
@@ -27,16 +44,31 @@ app = FastAPI(
     description="Variant C SPA backend — engine/* sarmalayıcısı.",
 )
 
+# ── Rate limiting (slowapi) ────────────────────────────────────────────
+# CPU-yoğun endpoint'ler (training/run, mining/start) için per-IP limit.
+if _SLOWAPI:
+    limiter = Limiter(key_func=get_remote_address, default_limits=["200/minute"])
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    app.add_middleware(SlowAPIMiddleware)
+else:
+    limiter = None
+
+_default_origins = (
+    "http://localhost:5173,http://127.0.0.1:5173,"
+    "http://localhost:5174,http://127.0.0.1:5174"
+)
+_cors_origins = [
+    o.strip()
+    for o in os.getenv("CORS_ORIGINS", _default_origins).split(",")
+    if o.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:5174",
-        "http://127.0.0.1:5174",
-    ],
+    allow_origins=_cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -74,3 +106,4 @@ app.include_router(jobs_routes.router, prefix="/api/jobs", tags=["jobs"])
 app.include_router(jobs_routes.ws_router)  # WebSocket /ws/jobs/{id}
 app.include_router(mining.router, prefix="/api/mining", tags=["mining"])
 app.include_router(training.router, prefix="/api/training", tags=["training"])
+app.include_router(system.router)

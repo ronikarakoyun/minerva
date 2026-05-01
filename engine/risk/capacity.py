@@ -54,12 +54,16 @@ def compute_adv(
     # Günlük TL hacim: Vlot × Pclose
     db["DailyVolTL"] = db["Vlot"] * db["Pclose"]
 
-    # Rolling ortalama — her ticker için ayrı (groupby → transform)
+    # N19: EWM (span=10) + rolling blend → likidite şokunu daha hızlı yakalar.
+    # min(rolling_20g, ewm_10) → geç algı riski azaltılır.
+    def _blended_adv(s: pd.Series) -> pd.Series:
+        roll = s.rolling(cfg.adv_window, min_periods=max(2, cfg.adv_window // 4)).mean()
+        ewm = s.ewm(span=10, min_periods=3).mean()
+        return pd.concat([roll, ewm], axis=1).min(axis=1)
+
     db["ADV_TL"] = (
         db.groupby("Ticker")["DailyVolTL"]
-        .transform(
-            lambda s: s.rolling(cfg.adv_window, min_periods=max(2, cfg.adv_window // 4)).mean()
-        )
+        .transform(_blended_adv)
     )
 
     # Look-ahead koruması: t gününün ADV'si t-1 verisiyle hesaplanmalı

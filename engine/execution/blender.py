@@ -150,6 +150,13 @@ def blend_regime_signals(
     # min_weight filtresi
     weights_df = weights_df.where(weights_df >= cfg.min_weight, 0.0)
 
+    # N22: min_weight filtresi sonrası NaN ve toplam sıfır satırları normalize et.
+    # NaN → 0, ardından row_sum > 0 olan satırları yeniden normalize.
+    weights_df = weights_df.fillna(0.0)
+    row_sums = weights_df.sum(axis=1)
+    nonzero = row_sums > 0
+    weights_df.loc[nonzero] = weights_df.loc[nonzero].div(row_sums[nonzero], axis=0)
+
     # EMA smoothing: w_t = α·w_new + (1-α)·w_{t-1}
     if cfg.smoothing_alpha < 1.0:
         smoothed = weights_df.copy()
@@ -159,6 +166,12 @@ def blend_regime_signals(
                 + (1 - cfg.smoothing_alpha) * smoothed.iloc[i - 1].values
             )
         weights_df = smoothed
+
+        # N22: EMA sonrası yeniden normalize et
+        weights_df = weights_df.fillna(0.0)
+        row_sums = weights_df.sum(axis=1)
+        nonzero = row_sums > 0
+        weights_df.loc[nonzero] = weights_df.loc[nonzero].div(row_sums[nonzero], axis=0)
 
     return weights_df
 

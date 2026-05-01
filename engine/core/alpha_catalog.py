@@ -13,11 +13,56 @@ Her kayıt:
   Her yüklemede mevcut şemaya otomatik taşınır.
   CATALOG_SCHEMA_VERSION artırıldığında _migrate_record güncellenmelidir.
 """
-import fcntl
+import glob
 import json
+import logging
 import os
+import shutil
+import tempfile
 from datetime import datetime
 from typing import Optional
+
+_cat_log = logging.getLogger(__name__)
+
+# Rotating snapshot — kaç yedek saklanacak (en eskisi silinir)
+CATALOG_SNAPSHOT_DIR = "data/catalog_snapshots"
+CATALOG_SNAPSHOT_KEEP = 7  # son 7 günlük yedek
+
+
+def _take_snapshot() -> None:
+    """
+    Mevcut alpha_catalog.json'u snapshot dizinine kopyalar (tarihli).
+
+    N46: Günde en fazla bir snapshot — aynı gün zaten snapshot varsa atla.
+    """
+    if not os.path.exists(CATALOG_PATH):
+        return
+    try:
+        os.makedirs(CATALOG_SNAPSHOT_DIR, exist_ok=True)
+        today_prefix = datetime.utcnow().strftime("%Y%m%d")
+
+        # N46: Bugün için zaten snapshot varsa atla
+        pattern = os.path.join(CATALOG_SNAPSHOT_DIR, "alpha_catalog_*.json")
+        all_snaps = sorted(glob.glob(pattern))
+        if all_snaps and os.path.basename(all_snaps[-1]).startswith(
+            f"alpha_catalog_{today_prefix}"
+        ):
+            return  # Bugün zaten alındı
+
+        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        dest = os.path.join(CATALOG_SNAPSHOT_DIR, f"alpha_catalog_{ts}.json")
+        shutil.copy2(CATALOG_PATH, dest)
+        # Eski yedekleri temizle: en yeni KEEP adet dışındakileri sil
+        all_snaps = sorted(glob.glob(pattern))
+        for old in all_snaps[:-CATALOG_SNAPSHOT_KEEP]:
+            try:
+                os.unlink(old)
+            except OSError:
+                pass
+    except Exception as exc:
+        _cat_log.warning("Catalog snapshot alınamadı: %s", exc)
+
+from filelock import FileLock
 
 from .alpha_cfg import Node
 from ..ml.replay_buffer import _tree_to_dict, _tree_from_dict
@@ -76,15 +121,31 @@ def _load_raw() -> list:
 
 
 def _save_raw(records: list) -> None:
+    """JSON'u atomik olarak yazar: önce geçici dosya, sonra rename.
+
+    FileLock (cross-platform) eş zamanlı yazmaları engeller.
+    Rename atomik olduğundan yarım yazma riski yoktur.
+    """
     os.makedirs(os.path.dirname(CATALOG_PATH), exist_ok=True)
     lock_path = CATALOG_PATH + ".lock"
-    with open(lock_path, "w") as lf:
-        fcntl.flock(lf, fcntl.LOCK_EX)
+    catalog_dir = os.path.dirname(os.path.abspath(CATALOG_PATH))
+
+    with FileLock(lock_path, timeout=15):
+        # Overwrite öncesi snapshot al (7-günlük döngüsel yedek)
+        _take_snapshot()
+        # Geçici dosyaya yaz, ardından atomik rename
+        fd, tmp_path = tempfile.mkstemp(dir=catalog_dir, suffix=".tmp")
         try:
-            with open(CATALOG_PATH, "w", encoding="utf-8") as f:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(records, f, ensure_ascii=False, indent=2)
-        finally:
-            fcntl.flock(lf, fcntl.LOCK_UN)
+            os.replace(tmp_path, CATALOG_PATH)
+        except Exception:
+            # Geçici dosyayı temizle, hatayı yukarı ilet
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
 
 def save_alpha(
@@ -233,6 +294,29 @@ def save_regime_champion(
     return existing
 
 
+def set_inactive(formula: str) -> bool:
+    """
+    Decay tetiklendiğinde formülü pasife al.
+
+    `live=False` ve `deactivated_at` timestamp eklenir; `regime_champion_for`
+    alanı temizlenir.  `get_active_champions()` live=False kayıtları döndürmez.
+
+    Returns
+    -------
+    bool — formül katalogda bulunursa True, bulunamazsa False.
+    """
+    records = _load_raw()
+    rec = next((r for r in records if r.get("formula") == formula), None)
+    if rec is None:
+        return False
+    rec["live"] = False
+    rec["deactivated_at"] = datetime.now().isoformat()
+    rec["updated_at"] = datetime.now().isoformat()
+    rec.pop("regime_champion_for", None)
+    _save_raw(records)
+    return True
+
+
 def get_active_champions() -> list[tuple[str, dict]]:
     """
     Faz 6: Decay-monitor için aktif şampiyon listesi.
@@ -251,6 +335,8 @@ def get_active_champions() -> list[tuple[str, dict]]:
     out: list[tuple[str, dict]] = []
     for r in _load_raw():
         if r.get("regime_champion_for") is None:
+            continue
+        if r.get("live") is False:  # set_inactive() tarafından pasife alındı
             continue
         formula = r.get("formula")
         if not formula:

@@ -11,12 +11,14 @@ export function MiniSparkline({
   color?: string;
   fill?: boolean;
 }) {
-  if (!data || data.length < 2) return <svg width={width} height={height} />;
-  const min = Math.min(...data);
-  const max = Math.max(...data);
+  // N35: NaN guard — sonsuz veya NaN değerleri filtrele
+  const safeData = (data ?? []).filter((v) => Number.isFinite(v));
+  if (safeData.length < 2) return <svg width={width} height={height} />;
+  const min = Math.min(...safeData);
+  const max = Math.max(...safeData);
   const span = max - min || 1;
-  const pts = data.map((v, i) => [
-    (i / (data.length - 1)) * width,
+  const pts = safeData.map((v, i) => [
+    (i / (safeData.length - 1)) * width,
     height - ((v - min) / span) * height,
   ]);
   const d = pts.map((p, i) => (i === 0 ? "M" : "L") + p[0].toFixed(1) + "," + p[1].toFixed(1)).join(" ");

@@ -33,6 +33,11 @@ class DecayConfig:
     lambda_threshold: float = 0.01   # kümülatif sapma alarm eşiği
     consecutive_days: int = 5        # ardışık alarm gün eşiği
     sigma_floor: float = 2.0         # |live - μ| > sigma_floor·σ pre-filter (günlük)
+    adaptive_delta: bool = True      # True → δ = 0.5 × backtest_std (vol-adaptif)
+    # N20: Tek-gün uç şok eşiği — bu eşiği aşan (≥ extreme_sigma_cap × σ)
+    # tek günlük kayıplar ardışık alarm sayacını sıfırlamaz ama artırmaz da;
+    # piyasa kaynaklı şok olarak muamele görür.
+    extreme_sigma_cap: float = 3.5   # |live - μ| > cap → outlier, sayaç dondur
 
 
 @dataclass
@@ -68,15 +73,29 @@ def update_decay_state(
         return state
 
     # Page-Hinkley negatif drift: μ - r - δ ne kadar büyük → daha çok kayıp
-    increment = backtest_mean - live_return - cfg.delta
+    # Vol-adaptif δ: yüksek volatilite dönemlerinde false alarm azaltır.
+    effective_delta = (
+        0.5 * max(backtest_std, 1e-12) if cfg.adaptive_delta else cfg.delta
+    )
+    increment = backtest_mean - live_return - effective_delta
     state.m = max(0.0, state.m + increment)
 
     # Pre-filter: bu gün de daily live_return σ-floor'dan kötü mü?
-    sigma_band = cfg.sigma_floor * max(backtest_std, 1e-12)
-    is_outlier = (backtest_mean - live_return) > sigma_band
+    effective_std = max(backtest_std, 1e-12)
+    sigma_band = cfg.sigma_floor * effective_std
+    extreme_band = cfg.extreme_sigma_cap * effective_std
+    deviation = backtest_mean - live_return
+    is_outlier = deviation > sigma_band
+
+    # N20: Uç şok tespiti — extreme_sigma_cap'i aşan tek-gün şoklar
+    # piyasa kaynaklı kabul edilir; sayaç ne artar ne sıfırlanır (dondurulur).
+    is_extreme_shock = deviation > extreme_band
 
     # Asıl tetikleme koşulu: cumulative m_t threshold'ı geçti VE bugün de outlier
-    if state.m > cfg.lambda_threshold and is_outlier:
+    if is_extreme_shock:
+        # N20: Uç şok → sayacı dondur (ne artır ne sıfırla)
+        pass
+    elif state.m > cfg.lambda_threshold and is_outlier:
         state.consecutive_alarms += 1
     else:
         state.consecutive_alarms = 0

@@ -54,7 +54,8 @@ class RegimeConfig:
     max_K: int = 6
     min_samples_per_regime: int = 200
     n_iter: int = 1000
-    covariance_type: str = "full"
+    # N7: "diag" → 4 param/regime (vs "full"=16), az veri durumunda daha kararlı
+    covariance_type: str = "diag"
     random_state: int = 42
     atr_window: int = 14
     volume_sma_window: int = 20
@@ -92,14 +93,22 @@ def fetch_bist_data(cfg: RegimeConfig) -> pd.DataFrame:
     return df
 
 
-def compute_features(df: pd.DataFrame, cfg: RegimeConfig) -> pd.DataFrame:
+def compute_features(
+    df: pd.DataFrame,
+    cfg: RegimeConfig,
+    train_end_date: Optional[pd.Timestamp] = None,
+) -> tuple[pd.DataFrame, RobustScaler]:
     """
     4 durağan özellik üretir ve RobustScaler ile ölçeklendirir.
 
+    N6: Scaler yalnızca `train_end_date`'e kadar olan veriye fit edilir;
+    tüm veri bu scaler ile transform edilir.
+    `train_end_date=None` → mevcut davranış (tüm veriye fit).
+
     Returns
     -------
-    pd.DataFrame
-        index=Date, columns=FEATURES, hepsi RobustScaler ile ölçeklenmiş.
+    tuple[pd.DataFrame, RobustScaler]
+        (scaled_features DataFrame, fit edilmiş scaler)
     """
     out = pd.DataFrame(index=df.index)
     out["Log_Return"] = np.log(df["Close"] / df["Close"].shift(1))
@@ -119,9 +128,21 @@ def compute_features(df: pd.DataFrame, cfg: RegimeConfig) -> pd.DataFrame:
         raise RuntimeError("Feature engineering: tüm satırlar NaN — veri yetersiz")
 
     scaler = RobustScaler()
-    scaled = scaler.fit_transform(out.values)
-    logger.info("Features hazır: %d satır × %d kolon (scaled)", *scaled.shape)
-    return pd.DataFrame(scaled, index=out.index, columns=FEATURES)
+    # N6: Scaler sadece train penceresi üzerine fit edilir
+    if train_end_date is not None:
+        train_mask = out.index <= pd.Timestamp(train_end_date)
+        train_data = out[train_mask].values
+        if len(train_data) < 10:
+            logger.warning("N6: train_end_date öncesi veri az (%d satır) — tüm veriye fit ediliyor", len(train_data))
+            train_data = out.values
+    else:
+        train_data = out.values
+
+    scaler.fit(train_data)
+    scaled = scaler.transform(out.values)
+    logger.info("Features hazır: %d satır × %d kolon (scaled, train_end=%s)",
+                *scaled.shape, train_end_date)
+    return pd.DataFrame(scaled, index=out.index, columns=FEATURES), scaler
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -363,6 +384,8 @@ def save_model(
         "regime_stats": regime_stats,
         "last_day": str(prob_df.index[-1].date()),
         "last_day_probs": {k: float(v) for k, v in prob_df.iloc[-1].items()},
+        # Label switching koruması: bir sonraki refit'te eski means ile align edilir
+        "regime_means": model.means_.tolist(),
     }
     cfg.metadata_path.write_text(
         json.dumps(metadata, indent=2, ensure_ascii=False)
@@ -374,6 +397,106 @@ def load_model(cfg: Optional[RegimeConfig] = None) -> GaussianHMM:
     """data/regime_hmm.pkl'den modeli geri yükle."""
     cfg = cfg or RegimeConfig()
     return joblib.load(cfg.model_path)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 1.6 — Label switching koruması (Hungarian permutation match)
+# ──────────────────────────────────────────────────────────────────────
+def align_regime_labels(
+    new_model: GaussianHMM,
+    old_means: Optional[np.ndarray] = None,
+    metadata_path: Optional[Path] = None,
+) -> "np.ndarray[int]":
+    """
+    Yeni HMM state ID'lerini eski state ID'lerine en yakın biçimde eşle.
+
+    HMM her refit'te state numaralandırmasını değiştirebilir (label switching).
+    Bu durum `regime_champion_for` eşleşmesini bozar.
+
+    Algoritma:
+      - Eski model'in per-regime mean return vektörünü referans al.
+      - Yeni modelin per-regime means'i ile Öklid uzaklığı maliyet matrisi kur.
+      - scipy.optimize.linear_sum_assignment (Hungarian) ile minimum maliyetli
+        atamayı bul.
+      - Döndürülen `perm` dizisinde perm[new_id] = old_id.
+
+    Parameters
+    ----------
+    new_model : GaussianHMM
+        Yeni fit edilmiş model.
+    old_means : np.ndarray (K_old, n_features), opsiyonel
+        Eski modelin öğrenilmiş means_. Sağlanmazsa metadata_path'ten yüklenir.
+    metadata_path : Path, opsiyonel
+        `data/regime_metadata.json` — old_means yoksa buradan okunur.
+
+    Returns
+    -------
+    perm : np.ndarray[int]
+        Boyut (K_new,). perm[new_state] = best_matching_old_state.
+        K_new ≠ K_old ise en iyi eşleme (min dist) döner; eşleşmeyen new_state'ler
+        kendine atanır (perm[i] = i fallback).
+    """
+    try:
+        from scipy.optimize import linear_sum_assignment
+    except ImportError:
+        logger.warning("scipy yok — label alignment atlanıyor, kimlik permütasyonu kullanılıyor")
+        K_new = new_model.n_components
+        return np.arange(K_new, dtype=int)
+
+    new_means = new_model.means_  # (K_new, n_features)
+    K_new = new_means.shape[0]
+
+    # Eski means'i al
+    if old_means is None and metadata_path is not None and metadata_path.exists():
+        try:
+            meta = json.loads(metadata_path.read_text())
+            if "regime_means" in meta:
+                old_means = np.array(meta["regime_means"], dtype=float)
+        except Exception:
+            old_means = None
+
+    if old_means is None:
+        logger.info("label_align: eski means yok — kimlik permütasyonu döndürülüyor")
+        return np.arange(K_new, dtype=int)
+
+    K_old = old_means.shape[0]
+
+    # Maliyet matrisi: (K_new, K_old) — Öklid uzaklığı
+    cost = np.zeros((K_new, K_old), dtype=float)
+    for i in range(K_new):
+        for j in range(K_old):
+            cost[i, j] = float(np.linalg.norm(new_means[i] - old_means[j]))
+
+    row_ind, col_ind = linear_sum_assignment(cost)
+    perm = np.arange(K_new, dtype=int)  # fallback: kimlik
+    for new_id, old_id in zip(row_ind, col_ind):
+        perm[new_id] = old_id
+
+    logger.info(
+        "HMM label alignment: perm=%s (cost=%.4f)",
+        perm.tolist(),
+        cost[row_ind, col_ind].sum(),
+    )
+    return perm
+
+
+def reorder_prob_df(prob_df: pd.DataFrame, perm: "np.ndarray[int]") -> pd.DataFrame:
+    """
+    prob_df kolonlarını `perm` permütasyonuna göre yeniden sırala.
+
+    prob_df.columns = ['regime_0', 'regime_1', ...] varsayımı.
+    perm[new_col_idx] = old_col_idx → eski indekslere göre yeniden adlandır.
+    """
+    K = prob_df.shape[1]
+    if len(perm) != K:
+        return prob_df  # boyut uyuşmazsa değiştirme
+
+    new_cols = [f"regime_{perm[i]}" for i in range(K)]
+    result = prob_df.copy()
+    result.columns = new_cols
+    # Sütunları eski sıraya göre düzenle (regime_0, regime_1, ...)
+    sorted_cols = sorted(result.columns, key=lambda c: int(c.split("_")[1]))
+    return result[sorted_cols]
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -391,7 +514,9 @@ def run_pipeline(cfg: Optional[RegimeConfig] = None) -> pd.DataFrame:
 
     logger.info("=== Minerva Faz 1: Regime Detection ===")
     df = fetch_bist_data(cfg)
-    features = compute_features(df, cfg)
+    # N6: 5 yıllık verinin ilk %80'ini train penceresi kabul et (scaler fit için)
+    train_end = df.index[int(len(df) * 0.80)] if len(df) > 50 else None
+    features, _scaler = compute_features(df, cfg, train_end_date=train_end)
     model, best_K, candidates = fit_constrained_hmm(features, cfg)
     # Backtest güvenli: yalnızca Forward algoritması (look-ahead yok).
     # Smoothed versiyon (predict_proba) canlı son gün için daha pürüzsüz olsa da
@@ -401,6 +526,14 @@ def run_pipeline(cfg: Optional[RegimeConfig] = None) -> pd.DataFrame:
     else:
         prob_df = compute_probability_vector(model, features)
     raw_returns = np.log(df["Close"] / df["Close"].shift(1)).dropna()
+
+    # Label switching koruması: eski metadata'daki means ile Hungarian align
+    perm = align_regime_labels(
+        model, old_means=None, metadata_path=cfg.metadata_path
+    )
+    if not np.array_equal(perm, np.arange(best_K)):
+        logger.info("Label switching tespiti — prob_df sütunları yeniden sıralanıyor")
+        prob_df = reorder_prob_df(prob_df, perm)
 
     plot_regimes(df["Close"], prob_df, cfg)
     save_model(model, best_K, candidates, prob_df, raw_returns, cfg)

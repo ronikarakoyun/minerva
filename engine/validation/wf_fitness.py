@@ -126,13 +126,18 @@ def make_purged_date_folds(
         if len(test_dates) < min_fold_days:
             continue
 
-        # Test fold başlangıcından purge_horizon gün öncesine kadar olan
+        # Test fold başlangıcından purge_horizon iş günü öncesine kadar olan
         # train örnekleri temizlenir (leakage bölgesi)
         test_start = test_dates[0]
 
-        # Purge maskesi: test_start'tan purge_horizon gün önce
-        # Takvim günü farkı kullanılır (iş günü yoksa takvim).
-        purge_cutoff = test_start - np.timedelta64(purge_horizon, "D")
+        # Purge maskesi: test_start'tan purge_horizon İŞ GÜNÜ önce.
+        # np.busday_offset ile takvim günü yerine iş günü sayımı yapılır;
+        # bu sayede Next_Ret=t+2 gibi iş günü bazlı hedefler için tam purge sağlanır.
+        test_start_day = test_start.astype("datetime64[D]")
+        purge_cutoff = np.datetime64(
+            np.busday_offset(test_start_day, -purge_horizon, roll="backward"),
+            "ns",
+        )
 
         # Train: test dışındaki + purge bölgesi dışındaki tarihler
         not_in_test = ~np.isin(unique_dates, test_dates)
@@ -159,7 +164,7 @@ def compute_wf_fitness(
     neutralize: bool = False,        # Faktör nötralizasyonu uygula
     factor_cache: "pd.DataFrame | None" = None,  # Önceden hesaplanmış faktörler
     lambda_size: float = 0.5,        # Size-corr penaltı ağırlığı
-    size_corr_hard_limit: float = 0.7,  # Ham sinyalde |size_corr| > bu → direkt reddet
+    size_corr_hard_limit: float = 0.5,  # N16: 0.7→0.5 — daha sıkı size filtresi
     regime: "pd.Series | None" = None,  # Date→{"bull","chop","bear"} rejim serisi
 ) -> dict:
     """

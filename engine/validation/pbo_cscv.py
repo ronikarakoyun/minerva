@@ -29,7 +29,7 @@ from scipy import stats
 
 def build_pnl_matrix(
     pool_pnl: "np.ndarray | list[np.ndarray]",
-    n_slices: int = 16,
+    n_slices: int = 8,  # N17: 16→8 (252/8=31g/slice, yeterli istatistik)
 ) -> np.ndarray:
     """
     Önceden hesaplanmış günlük PnL dizilerini (M × S) matrise böl.
@@ -40,7 +40,8 @@ def build_pnl_matrix(
         Her formül için kronolojik günlük PnL serisi.
         Eşit uzunlukta olmaları gerekir (kısa olanlar NaN ile doldurulur).
     n_slices : int
-        Zaman dilimi sayısı M (genellikle 8 veya 16).
+        Zaman dilimi sayısı M (genellikle 8).
+        N17: 252g/16=15g slice çok kısa → 8 slice önerilir (31g/slice).
 
     Döner
     ------
@@ -186,7 +187,7 @@ def compute_pool_pnl(
     trees: dict,
     db: pd.DataFrame,
     evaluate_fn,
-    n_slices: int = 16,
+    n_slices: int = 8,  # N17: 16→8 (252/8=31g/slice, yeterli istatistik)
     top_k: int = 50,
     n_drop: int = 5,
     buy_fee: float = 0.0005,

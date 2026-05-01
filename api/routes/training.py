@@ -7,13 +7,19 @@ from __future__ import annotations
 
 import asyncio
 
-from fastapi import APIRouter
+import threading
+
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 
-from api.deps import get_brain
+from api.deps import get_brain, verify_api_key
 from api.jobs import registry
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(verify_api_key)])
+
+# Per-IP rate limit: training CPU-bound; 2/dakika yeterli
+_MAX_CONCURRENT_TRAINING = 1
+_training_semaphore = asyncio.Semaphore(_MAX_CONCURRENT_TRAINING)
 
 
 @router.get("/buffer")
@@ -35,68 +41,75 @@ class TrainResponse(BaseModel):
 
 
 @router.post("/run", response_model=TrainResponse)
-async def run_training(req: TrainRequest) -> TrainResponse:
-    """Tree-LSTM eğitim job'ı başlat."""
+async def run_training(req: TrainRequest, request: Request) -> TrainResponse:
+    """Tree-LSTM eğitim job'ı başlat. Eş zamanlı en fazla 1 eğitim."""
+    if not _training_semaphore._value:  # type: ignore[attr-defined]
+        from fastapi import HTTPException
+        raise HTTPException(
+            status_code=429,
+            detail="Başka bir eğitim zaten çalışıyor — tamamlanmasını bekleyin.",
+        )
     job = registry.create()
     job.status = "running"
 
     loop = asyncio.get_event_loop()
 
     async def _run():
-        try:
-            await job.emit_log("Tree-LSTM eğitimi başlatılıyor…")
-            await job.emit_progress(0.02)
+        async with _training_semaphore:
+            try:
+                await job.emit_log("Tree-LSTM eğitimi başlatılıyor…")
+                await job.emit_progress(0.02)
 
-            brain = get_brain()
-            buf = brain["buffer"]
-            trainer = brain["trainer"]
+                brain = get_brain()
+                buf = brain["buffer"]
+                trainer = brain["trainer"]
 
-            if len(buf) < 2:
-                await job.emit_log(f"Buffer çok küçük ({len(buf)} formül) — önce formül parse edin")
-                await job.fail("Buffer yeterli değil")
-                return
+                if len(buf) < 2:
+                    await job.emit_log(f"Buffer çok küçük ({len(buf)} formül) — önce formül parse edin")
+                    await job.fail("Buffer yeterli değil")
+                    return
 
-            await job.emit_log(f"Buffer: {len(buf)} formül · {req.epochs} epoch başlıyor")
-            epochs_done = [0]
+                await job.emit_log(f"Buffer: {len(buf)} formül · {req.epochs} epoch başlıyor")
+                _cb_lock = threading.Lock()
 
-            def progress_cb(epoch: int, total: int, stats: dict) -> None:
-                epochs_done[0] = epoch
-                pct = epoch / max(total, 1)
-                asyncio.run_coroutine_threadsafe(
-                    job.emit_progress(0.05 + pct * 0.90), loop
+                def progress_cb(epoch: int, total: int, stats: dict) -> None:
+                    pct = epoch / max(total, 1)
+                    with _cb_lock:
+                        asyncio.run_coroutine_threadsafe(
+                            job.emit_progress(0.05 + pct * 0.90), loop
+                        )
+                        asyncio.run_coroutine_threadsafe(
+                            job.emit_log(
+                                f"epoch {epoch}/{total} · loss={stats['total']:.4f} · val={stats['value']:.4f}"
+                            ),
+                            loop,
+                        )
+
+                history = await asyncio.to_thread(
+                    trainer.train_epochs,
+                    buf,
+                    req.epochs,
+                    req.batch_size,
+                    req.use_policy,
+                    progress_cb,
                 )
-                asyncio.run_coroutine_threadsafe(
-                    job.emit_log(
-                        f"epoch {epoch}/{total} · loss={stats['total']:.4f} · val={stats['value']:.4f}"
-                    ),
-                    loop,
-                )
 
-            history = await asyncio.to_thread(
-                trainer.train_epochs,
-                buf,
-                req.epochs,
-                req.batch_size,
-                req.use_policy,
-                progress_cb,
-            )
+                await asyncio.to_thread(trainer.save)
+                await job.emit_log(f"Model kaydedildi — {len(history)} epoch tamamlandı")
 
-            await asyncio.to_thread(trainer.save)
-            await job.emit_log(f"Model kaydedildi — {len(history)} epoch tamamlandı")
+                loss_curve = [h["total"] for h in history]
+                last = history[-1] if history else {}
+                await job.finish({
+                    "epochs_done": len(history),
+                    "last_loss": last.get("total"),
+                    "last_val_loss": last.get("value"),
+                    "buffer_size": len(buf),
+                    "loss_curve": loss_curve,
+                })
 
-            loss_curve = [h["total"] for h in history]
-            last = history[-1] if history else {}
-            await job.finish({
-                "epochs_done": len(history),
-                "last_loss": last.get("total"),
-                "last_val_loss": last.get("value"),
-                "buffer_size": len(buf),
-                "loss_curve": loss_curve,
-            })
-
-        except Exception as exc:
-            await job.emit_log(f"HATA: {exc}")
-            await job.fail(str(exc))
+            except Exception as exc:
+                await job.emit_log(f"HATA: {exc}")
+                await job.fail(str(exc))
 
     asyncio.create_task(_run())
     return TrainResponse(job_id=job.id)

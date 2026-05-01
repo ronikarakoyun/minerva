@@ -19,13 +19,21 @@ import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import pandas as pd
+from filelock import FileLock
 from prefect import flow, get_run_logger, task
 
 from engine.notifications import send_telegram
 
 logger = logging.getLogger(__name__)
+
+# Alpha catalog üzerindeki orchestrator-seviyesi lock.
+# alpha_catalog.py kendi filelock'unu kullanır ama decay_scan (Task 4) ve
+# morning_execution (Task 5) birbirinden bağımsız task'tır; sıralı çalışsalar
+# da teorik olarak Prefect concurrency ile çakışabilir.
+_CATALOG_FLOW_LOCK = FileLock("data/.alpha_catalog_flow.lock", timeout=60)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -154,8 +162,8 @@ def _hook_morning_completed(task, task_run, state):
         # Fallback: basit mesaj
         try:
             send_telegram(f"🟢 Minerva tamamlandı (rapor üretilemedi: {e})")
-        except Exception:
-            pass
+        except Exception as e2:
+            logger.error("morning_completed fallback Telegram da başarısız: %s", e2)
 
 
 def _hook_decay_failed(task, task_run, state):
@@ -167,6 +175,39 @@ def _hook_decay_failed(task, task_run, state):
         f"Aksiyon: yeni mining koş, eski şampiyonu değiştir"
     )
     send_telegram(msg, parse_mode="Markdown")
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Stale data SAFE_MODE: veri bu kadar günden eskiyse trade engellenir.
+_STALE_DATA_MAX_DAYS: int = 3
+
+
+def _check_data_freshness(db_path: Path) -> None:
+    """
+    market_db.parquet'teki en son tarih bugünden 3 günden fazla gerideyse
+    SAFE_MODE aktif edilir: RuntimeError fırlatılır → morning_execution çalışmaz.
+    """
+    try:
+        db = pd.read_parquet(db_path, columns=["Date"])
+        last_date = pd.Timestamp(db["Date"].max())
+        today_ist = pd.Timestamp(datetime.now(ZoneInfo("Europe/Istanbul")).date())
+        age_days = (today_ist - last_date).days
+        if age_days > _STALE_DATA_MAX_DAYS:
+            msg = (
+                f"SAFE_MODE: market_db son tarih={last_date.date()} "
+                f"({age_days} gün eski) — trade engellendi."
+            )
+            logger.critical(msg)
+            try:
+                send_telegram(f"🛑 {msg}")
+            except Exception:
+                pass
+            raise RuntimeError(msg)
+        logger.info("Veri tazeliği OK: son tarih=%s (%d gün önce)", last_date.date(), age_days)
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        logger.warning("Veri tazeliği kontrolü başarısız: %s", exc)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -208,7 +249,8 @@ def task_detect_regime(db_path: Path) -> Path:
 # ──────────────────────────────────────────────────────────────────────
 # Task 3 — Optuna meta-tuning (yalnız Cuma gecesi)
 # ──────────────────────────────────────────────────────────────────────
-@task(name="nightly_mining", timeout_seconds=3600)
+# N48: 1h timeout, ama meta-opt (50×) + tam mining iki aşama: 2h daha güvenli.
+@task(name="nightly_mining", timeout_seconds=7200)
 def task_nightly_mining(db_path: Path, prob_path: Path,
                           only_on_weekday: int = 4,
                           n_trials: int = 50) -> dict:
@@ -217,7 +259,8 @@ def task_nightly_mining(db_path: Path, prob_path: Path,
     (only_on_weekday=4); diğer günler skip.
     """
     log = get_run_logger()
-    today = datetime.now().weekday()
+    # TZ-aware: Prefect UTC cronları İstanbul saatinden farklı olabilir.
+    today = datetime.now(ZoneInfo("Europe/Istanbul")).weekday()
     if only_on_weekday is not None and today != only_on_weekday:
         log.info("nightly_mining skip — bugün %d, hedef gün %d",
                  today, only_on_weekday)
@@ -227,9 +270,44 @@ def task_nightly_mining(db_path: Path, prob_path: Path,
     from engine.strategies.meta_optimizer import (
         MetaOptConfig, run_meta_optimization,
     )
+    from engine.strategies.mining_runner import MiningConfig, run_mining_window
+    from engine.core.alpha_catalog import save_alpha
+    from engine.core.alpha_cfg import AlphaCFG
+
+    # Meta-optimizasyon
     result = run_meta_optimization(MetaOptConfig(n_trials=n_trials))
     log.info("best_value=%.4f params=%s",
              result.get("best_value", 0.0), result.get("best_params"))
+
+    # best_params.json varsa sıcak mining başlat (temperature dahil)
+    best_params_path = Path("data/best_params.json")
+    if best_params_path.exists():
+        try:
+            mining_cfg = MiningConfig.from_best_params(best_params_path, num_gen=200)
+            log.info("from_best_params: temperature=%.2f search_mode=%s",
+                     mining_cfg.weight_cfg.temperature if mining_cfg.weight_cfg else 2.0,
+                     mining_cfg.search_mode)
+            db = pd.read_parquet(Path("data/market_db.parquet"))
+            cfg_alpha = AlphaCFG()
+            accepted = run_mining_window(db, cfg_alpha, mining_cfg)
+            log.info("best_params mining: %d formül kabul edildi", len(accepted))
+            for r in accepted:
+                try:
+                    save_alpha(
+                        formula=r.formula, tree=r.tree,
+                        ic=r.mean_ric, rank_ic=r.mean_ric,
+                        adj_ic=r.mean_ric - r.std_ric,
+                        source="meta_opt",
+                        wf_mean_ric=r.mean_ric, wf_std_ric=r.std_ric,
+                        wf_pos_folds=r.pos_folds, wf_n_folds=r.n_folds,
+                        wf_fitness=r.fitness,
+                    )
+                except Exception as save_exc:
+                    log.warning("save_alpha failed: %s", save_exc)
+            result["meta_mining_accepted"] = len(accepted)
+        except Exception as exc:
+            log.warning("best_params mining hatası: %s", exc)
+
     return result
 
 
@@ -243,7 +321,7 @@ def task_decay_scan(prob_path: Path) -> dict:
     varsa raise → flow Failed → automation tetiklenir.
     """
     log = get_run_logger()
-    from engine.core.alpha_catalog import get_active_champions
+    from engine.core.alpha_catalog import get_active_champions, set_inactive
     from engine.execution.paper_trader import feed_decay_monitor
 
     champions = get_active_champions()
@@ -261,10 +339,17 @@ def task_decay_scan(prob_path: Path) -> dict:
         if result.get("triggered"):
             triggered.append((fid, result))
             log.warning("DECAY tetikleyici: %s → %s", fid, result)
+            # Catalog lock ile thread-safe deactivation
+            with _CATALOG_FLOW_LOCK:
+                deactivated = set_inactive(fid)
+            if deactivated:
+                log.warning("AUTO-DEACTIVATE: %s katalogdan pasife alındı", fid)
+            else:
+                log.error("AUTO-DEACTIVATE BAŞARISIZ: %s katalogda bulunamadı", fid)
 
     if triggered:
         raise RuntimeError(
-            f"DECAY: {len(triggered)} şampiyon emekli edilmeli: "
+            f"DECAY: {len(triggered)} şampiyon emekli edildi: "
             + ", ".join(fid for fid, _ in triggered)
         )
 
@@ -281,6 +366,9 @@ def task_morning_execution(db_path: Path, prob_path: Path) -> dict:
     Faz 5: Önceki günün exit fill + bugünün blend + paper log + adli log.
     """
     log = get_run_logger()
+    # Stale data guard — eski verilerle trade yapmayı engelle
+    _check_data_freshness(db_path)
+
     from engine.core.alpha_cfg import AlphaCFG
     from engine.execution.blender import (
         BlenderConfig, blend_regime_signals, load_champions_from_catalog,

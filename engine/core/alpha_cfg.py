@@ -52,7 +52,7 @@ def _paired_rolling(x: pd.Series, y: pd.Series, w: int, fn: str) -> pd.Series:
 
 class AlphaCFG:
     # -------- Tablo 4: özellikler --------
-    FEATURES = ["Popen", "Phigh", "Plow", "Pclose", "Vlot", "Pvwap"]
+    FEATURES = ["Popen", "Phigh", "Plow", "Pclose", "Vlot", "Ptyp"]
 
     # -------- Tablo 5: sabitler ve pencereler --------
     CONSTANTS = [-0.1, -0.05, -0.01, 0.01, 0.05, 0.1]
@@ -97,7 +97,9 @@ class AlphaCFG:
             lambda g: g.rolling(int(w)).apply(lambda a: pd.Series(a).rank(pct=True).iloc[-1], raw=False)),
         "WMA":   lambda x, w: _grp(x).apply(
             lambda g: g.rolling(int(w)).apply(lambda a: np.average(a, weights=np.arange(1, len(a)+1)), raw=True)),
-        "EMA":   lambda x, w: _grp(x).apply(lambda g: g.ewm(span=int(w), adjust=False).mean()),
+        # N3: adjust=True + min_periods=window → warm-up bias önlenir
+        "EMA":   lambda x, w: _grp(x).apply(
+            lambda g: g.ewm(span=int(w), adjust=True, min_periods=int(w)).mean()),
         "Ref":   lambda x, w: _grp(x).shift(int(w)),
         "Mean":  lambda x, w: _grp(x).rolling(int(w)).mean().reset_index(0, drop=True),
         "Sum":   lambda x, w: _grp(x).rolling(int(w)).sum().reset_index(0, drop=True),
@@ -196,7 +198,8 @@ class AlphaCFG:
             if np.isscalar(res):
                 res = pd.Series(float(res), index=temp.index)
             res = res.replace([np.inf, -np.inf], np.nan).fillna(0)
-            lo, hi = res.quantile(0.01), res.quantile(0.99)
+            # N2: [1%,99%] → [0.5%,99.5%] — daha az agresif tail kesimi
+            lo, hi = res.quantile(0.005), res.quantile(0.995)
             return res.clip(lo, hi)
         except Exception:
             return pd.Series(np.zeros(len(temp)), index=temp.index)

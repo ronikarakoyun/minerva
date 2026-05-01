@@ -1,10 +1,19 @@
 """
 engine/db_builder.py - TÜM BIST EVRENİ (RONI'NİN TAM LİSTESİ) VERİTABANI İNŞA EDİCİ
+
+Değişiklikler:
+  N4  : shares_outstanding yfinance.info'dan çekilip market_db'ye eklendi.
+        factor_neutralize.py log(price × shares) yerine log(price) kullanıyor →
+        artık gerçek market-cap proxy mevcut.
+  N9  : Exponential backoff (3 deneme) + missing-ticker JSON raporu.
 """
-import yfinance as yf
-import pandas as pd
-from datetime import datetime, timedelta
+import json
 import os
+import time
+from datetime import datetime, timedelta
+
+import pandas as pd
+import yfinance as yf
 
 # Ayarlar
 DB_DIR = "data"
@@ -99,63 +108,153 @@ TICKERS = [
     "ZEDUR.IS", "ZERGY.IS", "ZRGYO.IS", "ZKBVK.IS", "ZKBVR.IS", "ZOREN.IS", "BINHO.IS"
 ]
 
-def build_database():
+# N9: Exponential backoff parametreleri
+_MAX_RETRIES = 3
+_BACKOFF_BASE = 2.0   # saniye — 2, 4, 8 sn
+
+
+def _download_with_retry(symbol: str, start_dt: str, end_dt: str) -> pd.DataFrame | None:
+    """
+    N9: yfinance.download + exponential backoff (3 deneme).
+    Hata türü ne olursa olsun son denemede None döner.
+    """
+    for attempt in range(_MAX_RETRIES):
+        try:
+            df = yf.download(
+                symbol, start=start_dt, end=end_dt,
+                auto_adjust=True, progress=False
+            )
+            if df is not None and not df.empty:
+                return df
+            return None
+        except Exception:
+            if attempt < _MAX_RETRIES - 1:
+                delay = _BACKOFF_BASE ** (attempt + 1)
+                time.sleep(delay)
+    return None
+
+
+def _fetch_shares_outstanding(tickers: list[str]) -> dict[str, float]:
+    """
+    N4: Her ticker için yfinance.Ticker.info["sharesOutstanding"] çek.
+
+    Yavaş çağrıdır (ticker başına ~0.3s); build_database bir kez çağırır.
+    Değer bulunamazsa veya hata alınırsa ticker atlanır (NaN → log(price) fallback).
+
+    Returns
+    -------
+    dict[ticker_symbol, shares_outstanding_float]
+    """
+    result: dict[str, float] = {}
+    n = len(tickers)
+    for i, symbol in enumerate(tickers):
+        print(f"[{i+1}/{n}] shares_outstanding çekiliyor: {symbol}", end="\r")
+        for attempt in range(_MAX_RETRIES):
+            try:
+                info = yf.Ticker(symbol).info
+                val = info.get("sharesOutstanding") or info.get("impliedSharesOutstanding")
+                if val and float(val) > 0:
+                    result[symbol] = float(val)
+                break
+            except Exception:
+                if attempt < _MAX_RETRIES - 1:
+                    time.sleep(_BACKOFF_BASE ** (attempt + 1))
+    print()  # satır sonu
+    return result
+
+
+def build_database(fetch_shares: bool = True) -> None:
+    """
+    BIST evrenini indir → market_db.parquet yaz.
+
+    Parameters
+    ----------
+    fetch_shares : bool
+        True → N4 shares_outstanding yfinance.info'dan çekilir ve
+        her satıra "shares_outstanding" kolonu eklenir.
+        False → sadece fiyat verisi (hızlı mod, mevcut davranış).
+    """
     print(f"🚀 Toplam {len(TICKERS)} sembol için veritabanı inşası başlıyor...")
     start_time = datetime.now()
-    
+
     # Zaman aralığı (Dinamik 5 Yıl)
     end_dt = datetime.today().strftime("%Y-%m-%d")
     start_dt = (datetime.today() - timedelta(days=5 * 365)).strftime("%Y-%m-%d")
-    
-    all_frames = []
-    
+
+    all_frames: list[pd.DataFrame] = []
+    missing_tickers: list[dict] = []  # N9: missing-ticker raporu
+
+    # ── Fiyat indirme ─────────────────────────────────────────────────
     for i, symbol in enumerate(TICKERS):
         print(f"[{i+1}/{len(TICKERS)}] ⬇️ İndiriliyor: {symbol}", end="\r")
+        df = _download_with_retry(symbol, start_dt, end_dt)
+
+        if df is None or len(df) < 50:
+            missing_tickers.append({"symbol": symbol, "reason": "empty_or_short"})
+            continue
+
         try:
-            # Otomatik düzeltme (temettü/bölünme) açık
-            df = yf.download(symbol, start=start_dt, end=end_dt, auto_adjust=True, progress=False)
-            
-            if df.empty or len(df) < 50:
-                continue
-                
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
-                
-            # Sütunları standartlaştır
-            col_map = {"Open": "Popen", "High": "Phigh", "Low": "Plow", "Close": "Pclose", "Volume": "Vlot"}
+
+            col_map = {
+                "Open": "Popen", "High": "Phigh", "Low": "Plow",
+                "Close": "Pclose", "Volume": "Vlot",
+            }
             df = df.rename(columns=col_map)
-            # Tablo 4 uyumu: VWAP (günlük yaklaşığı = typical price)
-            df["Pvwap"] = (df["Phigh"] + df["Plow"] + df["Pclose"]) / 3
-            df = df[["Popen", "Phigh", "Plow", "Pclose", "Vlot", "Pvwap"]].copy()
-            
+            df["Ptyp"] = (df["Phigh"] + df["Plow"] + df["Pclose"]) / 3
+            df = df[["Popen", "Phigh", "Plow", "Pclose", "Vlot", "Ptyp"]].copy()
             df["Ticker"] = symbol
             df.reset_index(inplace=True)
             all_frames.append(df)
-            
-        except Exception:
+        except Exception as exc:
+            missing_tickers.append({"symbol": symbol, "reason": str(exc)})
             continue
-            
-    if all_frames:
-        print(f"\n\n📊 Birleştiriliyor ve Parquet dosyasına yazılıyor...")
-        final_db = pd.concat(all_frames, ignore_index=True)
 
-        # Savunma: aynı ticker sembolü birden fazla kez listede geçebilir
-        # (örn. eski ve yeni sembol listelerinin birleştirilmesi). Dup'ları at.
-        _n0 = len(final_db)
-        final_db = final_db.drop_duplicates(subset=["Ticker", "Date"], keep="first")
-        if len(final_db) < _n0:
-            print(f"⚠️  {_n0 - len(final_db)} duplicate (Ticker,Date) satırı atıldı.")
-
-        db_path = os.path.join(DB_DIR, "market_db.parquet")
-        final_db.to_parquet(db_path, index=False, engine='pyarrow')
-        
-        elapsed = datetime.now() - start_time
-        print(f"✅ İŞLEM TAMAMLANDI!")
-        print(f"🔹 Toplam Satır: {len(final_db):,}")
-        print(f"🔹 Toplam Süre: {elapsed}")
-        print(f"💾 Konum: {db_path}")
-    else:
+    if not all_frames:
         print("\n❌ Hiç veri çekilemedi. Bağlantını kontrol et.")
+        return
+
+    print(f"\n\n📊 Birleştiriliyor...")
+    final_db = pd.concat(all_frames, ignore_index=True)
+
+    # Duplicate temizliği
+    _n0 = len(final_db)
+    final_db = final_db.drop_duplicates(subset=["Ticker", "Date"], keep="first")
+    if len(final_db) < _n0:
+        print(f"⚠️  {_n0 - len(final_db)} duplicate (Ticker,Date) satırı atıldı.")
+
+    # ── N4: shares_outstanding ──────────────────────────────────────────
+    if fetch_shares:
+        print(f"\n📈 shares_outstanding çekiliyor ({len(TICKERS)} ticker)...")
+        shares_map = _fetch_shares_outstanding(TICKERS)
+        print(f"✅ {len(shares_map)} tickerda shares_outstanding bulundu.")
+
+        final_db["shares_outstanding"] = final_db["Ticker"].map(shares_map)
+        # NaN → float (factor_neutralize.py log(price) fallback'e düşer)
+    else:
+        final_db["shares_outstanding"] = float("nan")
+
+    # ── Kaydet ────────────────────────────────────────────────────────
+    print("💾 Parquet dosyasına yazılıyor...")
+    db_path = os.path.join(DB_DIR, "market_db.parquet")
+    final_db.to_parquet(db_path, index=False, engine="pyarrow")
+
+    # N9: Missing-ticker raporu JSON
+    if missing_tickers:
+        report_path = os.path.join(DB_DIR, "missing_tickers.json")
+        with open(report_path, "w", encoding="utf-8") as f:
+            json.dump(missing_tickers, f, ensure_ascii=False, indent=2)
+        print(f"⚠️  {len(missing_tickers)} ticker eksik → {report_path}")
+
+    elapsed = datetime.now() - start_time
+    print(f"✅ İŞLEM TAMAMLANDI!")
+    print(f"🔹 Toplam Satır: {len(final_db):,}")
+    print(f"🔹 Başarılı Ticker: {len(all_frames)}")
+    print(f"🔹 Eksik Ticker: {len(missing_tickers)}")
+    print(f"🔹 Toplam Süre: {elapsed}")
+    print(f"💾 Konum: {db_path}")
+
 
 if __name__ == "__main__":
     build_database()

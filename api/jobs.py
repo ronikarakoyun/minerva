@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sqlite3
 import time
 import uuid
@@ -23,11 +24,20 @@ from pathlib import Path
 from typing import Any, Optional
 
 _DB_PATH = Path("data/jobs.db")
+_RETENTION_LIMIT = 500   # SQLite'ta saklanacak max job sayısı
+_MEMORY_LIMIT = 50       # In-memory tutulacak max job sayısı
+
+logger = logging.getLogger(__name__)
 
 
 def _init_db() -> None:
+    """DB'yi oluştur ve WAL modunu etkinleştir."""
     _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(_DB_PATH) as conn:
+    with sqlite3.connect(_DB_PATH, timeout=10) as conn:
+        # WAL: okuyucular yazarı, yazarlar okuyucuyu bloklamaz
+        conn.execute("PRAGMA journal_mode=WAL")
+        # WAL ile NORMAL güvenli ve FULL'dan hızlı
+        conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS jobs (
                 id TEXT PRIMARY KEY,
@@ -45,7 +55,8 @@ def _init_db() -> None:
 
 @contextmanager
 def _db():
-    conn = sqlite3.connect(_DB_PATH)
+    # timeout=5: kilit beklenirken 5 saniyede SQLITE_BUSY yerine graceful wait
+    conn = sqlite3.connect(_DB_PATH, timeout=5)
     conn.row_factory = sqlite3.Row
     try:
         yield conn
@@ -72,11 +83,32 @@ class Job:
     cancelled: bool = False
     _created_at: float = field(default_factory=time.time)
 
+    # N31: last_heartbeat timestamp — stale job tespiti için
+    last_heartbeat: float = field(default_factory=time.time)
+
+    def touch(self) -> None:
+        """Heartbeat güncelle — en az 30 sn'de bir çağrılmalı."""
+        self.last_heartbeat = time.time()
+
+    @property
+    def is_stale(self) -> bool:
+        """5 dakikadan uzun süre heartbeat yoksa stale kabul et."""
+        return self.status == "running" and (time.time() - self.last_heartbeat) > 300
+
     async def publish(self, event: JobEvent) -> None:
+        self.touch()  # N31: yayın = heartbeat
+        dead: list[asyncio.Queue] = []
         for q in list(self.subscribers):
             try:
                 q.put_nowait(event)
             except asyncio.QueueFull:
+                # N29: Taşan kuyruk → o subscriber'ı ölü say, listeden çıkar
+                dead.append(q)
+                logger.warning("Subscriber kuyruk taştı — bağlantı koparıldı")
+        for q in dead:
+            try:
+                self.subscribers.remove(q)
+            except ValueError:
                 pass
 
     async def emit_progress(self, value: float) -> None:
@@ -113,8 +145,11 @@ def _persist_job(job: Job) -> None:
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (job.id, job.status, job.progress, result_json,
                   job.error, job._created_at, time.time()))
-    except Exception:
-        pass  # Kalıcılık isteğe bağlı — hata sessizce göz ardı edilir
+    except sqlite3.OperationalError as exc:
+        # WAL modu ile nadir ama olası: disk dolu, izin hatası, vb.
+        logger.warning("Job persist başarısız (job_id=%s): %s", job.id, exc)
+    except Exception as exc:
+        logger.error("Job persist beklenmedik hata (job_id=%s): %s", job.id, exc)
 
 
 class JobRegistry:
@@ -128,11 +163,17 @@ class JobRegistry:
         jid = uuid.uuid4().hex[:12]
         job = Job(id=jid)
         self._jobs[jid] = job
-        with _db() as conn:
-            conn.execute(
-                "INSERT INTO jobs (id, status, progress, created_at) VALUES (?, ?, ?, ?)",
-                (jid, "pending", 0.0, job._created_at),
-            )
+        try:
+            with _db() as conn:
+                conn.execute(
+                    "INSERT INTO jobs (id, status, progress, created_at) VALUES (?, ?, ?, ?)",
+                    (jid, "pending", 0.0, job._created_at),
+                )
+        except Exception as exc:
+            logger.warning("Job kayıt oluşturulamadı (job_id=%s): %s", jid, exc)
+        # Bellek ve disk temizliği — her 20 job'da bir otomatik çalışır
+        if len(self._jobs) % 20 == 0:
+            self.cleanup_old()
         return job
 
     def get(self, jid: str) -> Optional[Job]:
@@ -156,21 +197,33 @@ class JobRegistry:
     def all(self) -> list[Job]:
         return list(self._jobs.values())
 
-    def cleanup_old(self, keep: int = 50) -> None:
-        """Bellekte en son N job'ı tut; SQLite'ta 500'ü aş → eskilerini sil."""
+    def cleanup_old(self, keep: int = _MEMORY_LIMIT) -> None:
+        """Bellekte en son N job'ı tut; SQLite'ta _RETENTION_LIMIT'i aşanları sil."""
+        # N31: Stale running job'ları "stale" statüsüne al
+        for job in list(self._jobs.values()):
+            if job.is_stale:
+                job.status = "stale"
+                _persist_job(job)
+                logger.warning(
+                    "Stale job tespit edildi (job_id=%s, last_heartbeat=%.0fs önce)",
+                    job.id, time.time() - job.last_heartbeat,
+                )
+
         if len(self._jobs) > keep:
             sorted_ids = list(self._jobs.keys())
             for jid in sorted_ids[:-keep]:
                 self._jobs.pop(jid, None)
         try:
             with _db() as conn:
-                conn.execute("""
+                deleted = conn.execute(f"""
                     DELETE FROM jobs WHERE id NOT IN (
-                        SELECT id FROM jobs ORDER BY created_at DESC LIMIT 500
+                        SELECT id FROM jobs ORDER BY created_at DESC LIMIT {_RETENTION_LIMIT}
                     )
-                """)
-        except Exception:
-            pass
+                """).rowcount
+            if deleted:
+                logger.info("Eski job kayıtları temizlendi: %d satır silindi.", deleted)
+        except Exception as exc:
+            logger.warning("Job temizleme başarısız: %s", exc)
 
 
 # Modül-seviyesi singleton

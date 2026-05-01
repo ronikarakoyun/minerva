@@ -11,8 +11,11 @@ import json
 import os
 import pickle  # sadece eski .pkl dosyaları okumak için (migration)
 import random
+import tempfile
 from collections import deque
 from typing import Deque, List, Optional, Tuple
+
+from filelock import FileLock
 
 from ..core.alpha_cfg import Node
 
@@ -43,6 +46,14 @@ class ReplayBuffer:
         self.capacity = capacity
         self.path = path
         self.buf: Deque[Sample] = deque(maxlen=capacity)
+        # N57: Lazy init — read-only sistemde __init__'te lock dosyası yaratmak fail eder.
+        # Lock nesnesini oluştur ama dosyayı dokunma (FileLock acquire'da yaratır).
+        try:
+            self._lock = FileLock(path + ".lock", timeout=30)
+        except Exception:
+            # Son çare: işlevsiz lock (threading.Lock ile değiştir)
+            import threading
+            self._lock = threading.Lock()  # type: ignore[assignment]
 
     def add(self, tree: Node, ic: float,
             visit_dist: Optional[List[float]] = None) -> None:
@@ -61,15 +72,27 @@ class ReplayBuffer:
 
     # ---- persistans ----
     def save(self) -> None:
-        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
         serial = [(_tree_to_dict(t), ic, vd) for (t, ic, vd) in self.buf]
         payload = {"version": 3, "data": serial}
-        # JSON: arbitrary code execution riski yok (pickle'ın aksine)
-        with open(self.path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False)
+        # Atomic write: tmp → rename + cross-process filelock
+        with self._lock:
+            dir_ = os.path.dirname(self.path) or "."
+            fd, tmp_path = tempfile.mkstemp(dir=dir_, suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, ensure_ascii=False)
+                os.replace(tmp_path, self.path)
+            except Exception:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
 
     def load(self) -> "ReplayBuffer":
-        raw = self._read_raw()
+        with self._lock:
+            raw = self._read_raw()
         if raw is None:
             return self
 
@@ -91,7 +114,12 @@ class ReplayBuffer:
         return self
 
     def _read_raw(self):
-        """JSON'dan oku; yoksa eski .pkl'a bak (migration path)."""
+        """
+        JSON'dan oku; yoksa eski .pkl'a bak (migration path).
+
+        N45: Migration (pkl → json) da filelock altında — çağıran load()
+        zaten lock tutuyor, bu method lock almaz (tekrar girme → deadlock).
+        """
         # Önce JSON
         if os.path.exists(self.path):
             try:
@@ -105,7 +133,7 @@ class ReplayBuffer:
             try:
                 with open(legacy_pkl, "rb") as f:
                     data = pickle.load(f)  # noqa: S301 — migration only
-                # Migration: hemen JSON'a taşı, pkl'ı sil
+                # N45: Migration lock altında (çağıran load() lock'u tutuyor)
                 self._write_json_from_raw(data)
                 os.remove(legacy_pkl)
                 return data
@@ -114,15 +142,31 @@ class ReplayBuffer:
         return None
 
     def _write_json_from_raw(self, raw) -> None:
-        """Migration sırasında raw pickle içeriğini JSON'a yazar."""
+        """
+        Migration sırasında raw pickle içeriğini JSON'a yazar.
+        N45: Bu metod filelock almaz — çağıran (load → _read_raw) zaten lock tutuyor.
+        """
         if isinstance(raw, dict) and raw.get("version") == 2:
             items = raw["data"]
         else:
             return  # v1 legacy Node nesneleri JSON'a yazılamaz, atla
         payload = {"version": 3, "data": items}
-        os.makedirs(os.path.dirname(self.path), exist_ok=True)
-        with open(self.path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False)
+        # N57: makedirs read-only sistemde fail edebilir → try/except
+        try:
+            os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+        except OSError:
+            return  # Dizin oluşturulamazsa migration atla
+        dir_ = os.path.dirname(self.path) or "."
+        fd, tmp_path = tempfile.mkstemp(dir=dir_, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False)
+            os.replace(tmp_path, self.path)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
     def clear(self) -> None:
         self.buf.clear()

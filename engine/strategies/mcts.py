@@ -56,18 +56,40 @@ class GrammarMCTS:
         # Subtree prior: bilinen iyi alt-ağaçlara bonus — sıfırdan öğrenmeyi azaltır
         self.subtree_prior: dict = subtree_prior or {}
 
-    # PUCT (Alg. 3):  a* = argmax Q + c · √(b/b_ref) · (P + prior_bonus) · √ΣN / (1+N(s,a))
-    def _puct(self, parent: _MCTSNode, child: _MCTSNode, b_ref: int) -> float:
+    # N11: Softmax temperature normalize — P + prior_bonus toplamı [0,2] aşar
+    _PUCT_TEMPERATURE: float = 1.0  # softmax sıcaklığı; düşürdükçe keskin seçim
+
+    def _compute_softmax_priors(self, children: list) -> dict:
+        """
+        N11: Tüm çocukların P + prior_bonus değerlerini softmax ile normalize et.
+        Sonuç: her çocuk için [0,1] aralığında olasılık → toplam = 1.0.
+        """
+        import math as _math
+        raw: list[float] = []
+        for c in children:
+            rb = self.subtree_prior.get(str(c.state), 0.0)
+            max_p = max(self.subtree_prior.values(), default=1.0) or 1.0
+            raw.append(c.P + rb / max_p)
+        # Softmax ile [0,1] aralığına normalize
+        max_raw = max(raw) if raw else 0.0
+        exps = [_math.exp((r - max_raw) / max(self._PUCT_TEMPERATURE, 1e-6)) for r in raw]
+        total = sum(exps) or 1.0
+        return {id(c): e / total for c, e in zip(children, exps)}
+
+    # PUCT (Alg. 3):  a* = argmax Q + c · √(b/b_ref) · P_norm · √ΣN / (1+N(s,a))
+    def _puct(
+        self,
+        parent: _MCTSNode,
+        child: _MCTSNode,
+        b_ref: int,
+        softmax_priors: dict | None = None,
+    ) -> float:
         b = max(len(parent.children), 1)
         bal = math.sqrt(b / max(b_ref, 1))
         total_N = sum(c.N for c in parent.children)
-        # Warm-start prior bonus (6.3): katalogdaki iyi alt-ağaçlara ek öncelik.
-        # prior_bonus normalize edilmeli: ham değer P aralığını [0,1]'in çok
-        # üstüne taşıyabilir → keşif/sömürü dengesini bozar.
-        raw_bonus = self.subtree_prior.get(str(child.state), 0.0)
-        max_prior = max(self.subtree_prior.values(), default=1.0) or 1.0
-        prior_bonus = raw_bonus / max_prior   # [0, 1] aralığına normalize et
-        u = self.c_puct * bal * (child.P + prior_bonus) * math.sqrt(total_N + 1) / (1 + child.N)
+        # N11: softmax-normalized prior — toplam kesinlikle 1.0
+        p_norm = (softmax_priors or {}).get(id(child), child.P)
+        u = self.c_puct * bal * p_norm * math.sqrt(total_N + 1) / (1 + child.N)
         return child.Q + u
 
     def _is_terminal(self, node: Node) -> bool:
@@ -85,15 +107,9 @@ class GrammarMCTS:
     def _simulate_value(self, node: Node) -> float:
         if self.value_fn is not None:
             return float(self.value_fn(node))
-        # Neural value network yoksa: yapısal çeşitliliği ödüllendiren
-        # kaba bir heuristik (operatör çeşitliliği + derinlik dengesi).
-        ops = set()
-        def walk(n):
-            ops.add((n.kind, n.op))
-            for c in n.children:
-                walk(c)
-        walk(node)
-        return min(1.0, len(ops) / 10.0)
+        # N13: `unique_ops/10` heuristic kaldırıldı — fonksiyonel ve çeşitli
+        # formülleri cezalandırıyordu. value_fn yoksa sabit 0.5 (tarafsız prior).
+        return 0.5
 
     def search(self, iterations: int = 200) -> Node:
         """Alg. 3: I iterasyon MCTS; kök durumdan en sık ziyaret edilen yolu döndürür."""
@@ -115,7 +131,9 @@ class GrammarMCTS:
         b_ref = 8
         cur = node
         while cur.children:
-            cur = max(cur.children, key=lambda c: self._puct(cur, c, b_ref))
+            # N11: Softmax priorları bir kez hesapla, tüm çocuklara geç
+            sp = self._compute_softmax_priors(cur.children)
+            cur = max(cur.children, key=lambda c: self._puct(cur, c, b_ref, sp))
         # Expansion: mutasyon/crossover benzeri üretim
         for _ in range(4):
             candidate = self.cfg.mutate(cur.state) if random.random() < 0.5 \

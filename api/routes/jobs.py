@@ -59,12 +59,22 @@ async def test_echo() -> dict[str, str]:
 
 
 @ws_router.websocket("/ws/jobs/{job_id}")
-async def ws_job(ws: WebSocket, job_id: str) -> None:
+async def ws_job(ws: WebSocket, job_id: str, api_key: str = "") -> None:
     """
-    Job event stream. Kullanım:
-      const ws = new WebSocket(`ws://localhost:8000/ws/jobs/${id}`)
+    Job event stream.
+
+    N30: API key query param ile basit auth koruması.
+          ?api_key=<key> — eksik veya yanlış → 4401 close.
+    Kullanım:
+      const ws = new WebSocket(`ws://localhost:8000/ws/jobs/${id}?api_key=<key>`)
       ws.onmessage = (e) => JSON.parse(e.data)  // {type, data}
     """
+    import os as _os
+    _expected_key = _os.getenv("MINERVA_API_KEY", "")
+    if _expected_key and api_key != _expected_key:
+        await ws.close(code=4401, reason="Yetkisiz — api_key gerekli")
+        return
+
     job = registry.get(job_id)
     if job is None:
         await ws.close(code=4404, reason="Job bulunamadı")
@@ -84,7 +94,32 @@ async def ws_job(ws: WebSocket, job_id: str) -> None:
             await ws.send_json({"type": "log", "data": line})
 
         while True:
-            event = await queue.get()
+            # Heartbeat desteği: event'i 30 sn timeout ile bekle.
+            # Süre dolunca ping mesajı kontrol et; gerçek event yoksa döngüye devam et.
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=30.0)
+            except asyncio.TimeoutError:
+                # Herhangi bir bekleyen client mesajı var mı kontrol et (ping)
+                try:
+                    raw = await asyncio.wait_for(ws.receive_text(), timeout=0.01)
+                    import json as _json
+                    msg = _json.loads(raw)
+                    if msg.get("type") == "ping":
+                        await ws.send_json({"type": "pong"})
+                except (asyncio.TimeoutError, Exception):
+                    pass
+                continue
+
+            # Önce gelen client mesajlarını tüket (ping'ler)
+            try:
+                raw = await asyncio.wait_for(ws.receive_text(), timeout=0.01)
+                import json as _json
+                msg = _json.loads(raw)
+                if msg.get("type") == "ping":
+                    await ws.send_json({"type": "pong"})
+            except (asyncio.TimeoutError, Exception):
+                pass
+
             await ws.send_json({"type": event.type, "data": event.data})
             if event.type in ("result", "error"):
                 break

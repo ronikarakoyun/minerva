@@ -218,6 +218,19 @@ def neutralize_signal(
             }))
             continue
 
+        # N5: NaN rank satırlarını filtrele — 0 substitusyonu yapmıyoruz.
+        rank_cols_present = [f"{c}_rank" for c in available if f"{c}_rank" in clean.columns]
+        if rank_cols_present:
+            clean = clean.dropna(subset=rank_cols_present)
+
+        if len(clean) < 10:
+            pieces.append(pd.DataFrame({
+                "Ticker": group["Ticker"].values,
+                "Date":   date,
+                "resid":  group["signal"].values,
+            }))
+            continue
+
         # ── Stage 1: Rank-Space OLS ────────────────────────────────────
         # Spearman IC rank uzayında ölçüldüğü için OLS'yi rank uzayında yap.
         # Cross-sectional uniform rank → [-0.5, 0.5]
@@ -229,7 +242,7 @@ def neutralize_signal(
         for c in available:
             rank_col = f"{c}_rank"
             if rank_col in clean.columns and not clean[rank_col].isna().all():
-                X_cols.append(np.nan_to_num(clean[rank_col].values.astype(float), nan=0.0))
+                X_cols.append(clean[rank_col].values.astype(float))   # NaN zaten filtrelendi
             else:
                 X_cols.append(_rank_norm(clean[c].values.astype(float)))
         X = np.column_stack(X_cols)

@@ -33,7 +33,8 @@ def compute_triple_barrier_labels(
     vol_window: int = 20,
     min_vol: float = 0.005,
     long_only: bool = True,
-) -> pd.Series:
+    return_weights: bool = False,
+) -> "pd.Series | tuple[pd.Series, pd.Series]":
     """
     Her (Ticker, Date) çifti için triple-barrier etiketi hesapla.
 
@@ -48,13 +49,15 @@ def compute_triple_barrier_labels(
                  BIST'te BIST30 dışında short işlem yapılamadığı için
                  varsayılan True. IC artık sadece "üst bariyeri tahmin et"
                  üzerine kurulu olur (binary: 1=al, 0=bekle/kaçın).
+    return_weights : N8 — True → (labels, sample_weights) tuple döner.
+                 Son horizon gün eksik etiket alır (timeout=0.0) ama
+                 sample_weight=0 → IC/model eğitimde bu satırlar yok sayılır.
 
     Returns
     -------
-    pd.Series  : index=(Ticker, Date)
-                 long_only=True  → değerler ∈ {0, +1}
-                 long_only=False → değerler ∈ {-1, 0, +1}
-                 float olarak döner (IC hesabıyla uyumlu)
+    pd.Series ya da tuple[pd.Series, pd.Series]
+        return_weights=False (default): labels Series, index=(Ticker, Date)
+        return_weights=True: (labels, weights) — weights ∈ {0.0, 1.0}
     """
     db = db.sort_values(["Ticker", "Date"]).copy()
 
@@ -75,7 +78,11 @@ def compute_triple_barrier_labels(
         for i, t in enumerate(dates):
             if i < vol_window:
                 continue
-            if i + horizon >= len(dates):
+            # N8: Son horizon günleri artık atlanmıyor — sample_weight=0 ile dahil
+            is_end_window = (i + horizon >= len(dates))
+            if is_end_window:
+                # Zaman bariyeri tamamlanamaz → timeout etiketi, sıfır ağırlık
+                labels.append({"Ticker": ticker, "Date": t, "TB_Label": 0.0, "TB_Weight": 0.0})
                 continue
 
             p0        = close.iloc[i]
@@ -105,13 +112,19 @@ def compute_triple_barrier_labels(
                 else:
                     label = 0.0 if long_only else -1.0
 
-            labels.append({"Ticker": ticker, "Date": t, "TB_Label": label})
+            labels.append({"Ticker": ticker, "Date": t, "TB_Label": label, "TB_Weight": 1.0})
 
     if not labels:
+        if return_weights:
+            return pd.Series(dtype=float), pd.Series(dtype=float)
         return pd.Series(dtype=float)
 
     df_labels = pd.DataFrame(labels).set_index(["Ticker", "Date"]).sort_index()
-    return df_labels["TB_Label"]
+    label_series = df_labels["TB_Label"]
+    if return_weights:
+        weight_series = df_labels["TB_Weight"]
+        return label_series, weight_series
+    return label_series
 
 
 def add_triple_barrier_to_idx(
