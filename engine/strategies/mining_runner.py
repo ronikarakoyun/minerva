@@ -24,6 +24,7 @@ import numpy as np
 import pandas as pd
 
 from ..core.alpha_cfg import AlphaCFG, Node
+from ..validation.deflated_sharpe import deflated_sharpe_ratio
 from ..validation.wf_fitness import compute_wf_fitness, make_date_folds, make_purged_date_folds
 from ..validation.weighted_fitness import (
     WeightConfig,
@@ -50,6 +51,9 @@ class MiningConfig:
     seed: int = 42
     min_mean_ric: float = 0.003   # Kabul eşiği
     min_pos_ratio: float = 0.4
+    # DSR gating — True ise top-100 havuzu DSR testi ile filtreler
+    use_dsr_filter: bool = False
+    dsr_min_p: float = 0.75       # DSR p-value minimum eşiği (0.75 = %75 güven)
     # Faz 2 — Rejim-koşullu ağırlıklı fitness
     use_regime_weighting: bool = False
     weight_cfg: Optional[WeightConfig] = None
@@ -194,6 +198,19 @@ def _run_mining_window_impl(
         if seed_trees:
             for t in seed_trees[:50]:
                 prior[str(t)] = 0.1
+        # N15: Cascading prior — replay buffer'dan top-K formülleri prior olarak ekle.
+        # Her pencere, bir önceki pencerenin en iyi formüllerinden beslenilir.
+        try:
+            from engine.ml.replay_buffer import ReplayBuffer
+            _rb = ReplayBuffer().load()
+            if len(_rb) > 0:
+                _rb_samples = sorted(_rb.buf, key=lambda s: s[1], reverse=True)
+                for _tree, _ic, _vd in _rb_samples[:20]:
+                    _key = str(_tree)
+                    # IC'yi [0, 1] aralığına normalize et — mevcut prior ile birleştir
+                    prior[_key] = max(prior.get(_key, 0.0), min(float(_ic), 1.0))
+        except Exception:
+            pass  # Replay buffer erişim hatası — prior olmadan devam et
         searcher = GrammarMCTS(
             cfg, max_K=mcfg.max_K, c_puct=mcfg.c_puct,
             rollouts=mcfg.mcts_rollouts, subtree_prior=prior,
@@ -246,7 +263,10 @@ def _run_mining_window_impl(
                 if use_weighted:
                     stats = compute_weighted_wf_fitness(
                         tree, cfg.evaluate, idx, mining_folds,
-                        weights=regime_weights, **wf_kwargs,
+                        weights=regime_weights,
+                        prob_df=mcfg.prob_df,
+                        weight_cfg=mcfg.weight_cfg,
+                        **wf_kwargs,
                     )
                 else:
                     stats = compute_wf_fitness(
@@ -303,4 +323,27 @@ def _run_mining_window_impl(
 
     # Fitness'a göre sırala
     results.sort(key=lambda r: r.fitness, reverse=True)
+
+    # ── DSR Gating ──────────────────────────────────────────────────────────
+    # Top-100 aday üzerinde Deflated Sharpe Ratio testi uygula.
+    # Selection bias'ı azaltır: havuz büyüklüğü kadar şans düzeltmesi yapılır.
+    if mcfg.use_dsr_filter and len(results) > 1:
+        n_trials = len(results)
+        filtered: list[MiningResult] = []
+        for r in results[:100]:  # En fazla top-100'ü test et (hız için)
+            try:
+                _dsr_z, p_value = deflated_sharpe_ratio(
+                    sr=r.mean_ric * 16,  # IC → yaklaşık annualized Sharpe
+                    T=max(n_pool, 60),
+                    skew=0.0,
+                    kurt=0.0,
+                    n_trials=n_trials,
+                )
+                if not np.isfinite(p_value) or p_value >= mcfg.dsr_min_p:
+                    filtered.append(r)
+            except Exception:
+                filtered.append(r)  # DSR hatasında koru
+        results = filtered + results[100:]  # 100 sonrasını olduğu gibi tut
+    # ────────────────────────────────────────────────────────────────────────
+
     return results

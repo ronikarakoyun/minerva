@@ -33,7 +33,7 @@ from engine.risk.position_sizer import compute_asset_vol
 
 FORENSIC_COLUMNS = [
     "execution_id", "timestamp", "date", "ticker", "action",
-    "target_weight", "prev_weight",
+    "target_weight", "prev_weight", "weight_delta", "turnover",
     "hmm_state", "hmm_top_regime", "hmm_top_p",
     "champion_id", "champion_formula",
     "adv_TL", "adv_limit_ratio", "expected_slip_bps", "asset_vol",
@@ -77,24 +77,52 @@ def _dominant_champion(
     """
     Bu satır için en baskın rejim şampiyonunu bul.
 
-    `champions` dict[int, Node] (regime_id → AST). Her rejim için sinyal değeri
-    × prob[regime] hesaplanır; max veren rejim baskın kabul edilir.
+    N23: argmax(prob) yerine ağırlıklı sinyal × olasılık skoru kullanılır.
+    Her rejim için: score = |signal_value| × prob[regime]. En yüksek skoru
+    alan rejim baskın kabul edilir. Sinyal hesaplanamıyorsa prob tek başına
+    kullanılır (graceful fallback).
 
-    Şampiyon değerlendirmesi pahalı; t. günde yalnızca tek hisseye bakmak için
-    db_today (o günün satırları) yeterli olur. Hata olursa argmax(prob) döner.
+    `champions` dict[int, Node] (regime_id → AST). alpha_cfg sağlandığında
+    tam sinyal değerlendirmesi yapılır; yoksa prob ağırlığına göre seçim.
     """
     if not champions:
         return None, ""
 
-    # Hızlı yol: argmax(prob) — sinyal hesaplama yapmadan
-    # (gerçek dominans için sinyal × prob gerekir; ama günlük log için pratik)
     try:
-        top_regime = int(prob_row.values.argmax())
-        if top_regime in champions:
-            tree = champions[top_regime]
-            formula = str(tree)
-            return top_regime, formula
-        # argmax bulunmuyorsa ilk mevcut şampiyon
+        # N23: Weighted signal × probability dominant selection
+        idx_today = db_today.set_index(["Ticker", "Date"]) if (
+            "Ticker" in db_today.columns and "Date" in db_today.columns
+        ) else None
+
+        best_regime: Optional[int] = None
+        best_score: float = -1.0
+
+        for regime_id, tree in champions.items():
+            prob_val = float(prob_row.get(regime_id, 0.0)) if hasattr(prob_row, "get") \
+                else (float(prob_row.iloc[regime_id]) if regime_id < len(prob_row) else 0.0)
+
+            signal_mag = 1.0  # fallback: sadece prob kullan
+            if alpha_cfg is not None and idx_today is not None and len(idx_today) > 0:
+                try:
+                    sig = alpha_cfg.evaluate(tree, idx_today)
+                    if sig is not None and ticker in sig.index.get_level_values(0):
+                        ticker_sig = sig.xs(ticker, level=0)
+                        if len(ticker_sig) > 0:
+                            signal_mag = abs(float(ticker_sig.iloc[-1]))
+                            if not np.isfinite(signal_mag):
+                                signal_mag = 1.0
+                except Exception:
+                    pass  # sinyal hesaplanamadı → signal_mag=1.0 ile devam
+
+            score = signal_mag * prob_val
+            if score > best_score:
+                best_score = score
+                best_regime = regime_id
+
+        if best_regime is not None and best_regime in champions:
+            return int(best_regime), str(champions[best_regime])
+
+        # Son çare: ilk mevcut şampiyon
         first_k = next(iter(champions))
         return int(first_k), str(champions[first_k])
     except Exception:
@@ -205,6 +233,7 @@ def log_decision_forensics(
             ticker, prob_row, champions, db_today,
         )
 
+        weight_delta = float(weight) - prev
         rows.append({
             "execution_id":      uuid.uuid4().hex,
             "timestamp":         ts_iso,
@@ -213,6 +242,8 @@ def log_decision_forensics(
             "action":            action,
             "target_weight":     float(weight),
             "prev_weight":       prev,
+            "weight_delta":      weight_delta,
+            "turnover":          abs(weight_delta),
             "hmm_state":         hmm_state_str,
             "hmm_top_regime":    top_regime,
             "hmm_top_p":         top_p,

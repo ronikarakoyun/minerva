@@ -4,9 +4,10 @@ from __future__ import annotations
 import io
 
 import pandas as pd
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
+from api.deps import verify_api_key
 from api.schemas import CatalogRecord
 from engine.core.alpha_catalog import _load_raw, _save_raw, load_catalog
 
@@ -49,16 +50,32 @@ def export_csv() -> StreamingResponse:
     )
 
 
-@router.delete("")
-def clear_catalog() -> dict[str, int]:
-    """Tüm katalog'u temizle. data/alpha_catalog.json boş array olur."""
+@router.delete("", dependencies=[Depends(verify_api_key)])
+def clear_catalog(confirm: bool = Query(False)) -> dict[str, int]:
+    """Tüm katalog'u temizle. data/alpha_catalog.json boş array olur.
+
+    Yanlışlıkla silmeyi önlemek için ?confirm=true sorgu parametresi gereklidir.
+    """
+    if not confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="Silmek için ?confirm=true ekleyin",
+        )
     _save_raw([])
     return {"deleted": 1, "remaining": 0}
 
 
-@router.delete("/{formula:path}")
-def delete_one(formula: str) -> dict[str, int]:
-    """Tekil formül sil. URL-encoded formül kabul edilir."""
+@router.delete("/{formula:path}", dependencies=[Depends(verify_api_key)])
+def delete_one(formula: str, confirm: bool = Query(False)) -> dict[str, int]:
+    """Tekil formül sil. URL-encoded formül kabul edilir.
+
+    Yanlışlıkla silmeyi önlemek için ?confirm=true sorgu parametresi gereklidir.
+    """
+    if not confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="Silmek için ?confirm=true ekleyin",
+        )
     records = _load_raw()
     before = len(records)
     records = [r for r in records if r.get("formula") != formula]

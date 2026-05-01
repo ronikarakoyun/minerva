@@ -47,16 +47,16 @@ export default function Workbench() {
   const [sourceFilter, setSourceFilter] = useState("EVO");
   const [neutralize, setNeutralize] = useState(true);
 
-  // Mining params — stateful
-  const [mPopSize, setMPopSize] = useState("300");
-  const [mMaxK, setMMaxK] = useState("15");
-  const [mFolds, setMFolds] = useState("5");
-  const [mEmbargo, setMEmbargo] = useState("5");
-  const [mPurge, setMPurge] = useState("10");
-  const [mLambdaStd, setMLambdaStd] = useState("0.50");
-  const [mLambdaCx, setMLambdaCx] = useState("0.001");
-  const [mLambdaSize, setMLambdaSize] = useState("0.50");
-  const [mSizeCorr, setMSizeCorr] = useState("0.70");
+  // Mining params — numeric state (N38: store as numbers to avoid string→API mismatch)
+  const [mPopSize, setMPopSize] = useState(300);
+  const [mMaxK, setMMaxK] = useState(15);
+  const [mFolds, setMFolds] = useState(5);
+  const [mEmbargo, setMEmbargo] = useState(5);
+  const [mPurge, setMPurge] = useState(10);
+  const [mLambdaStd, setMLambdaStd] = useState(0.50);
+  const [mLambdaCx, setMLambdaCx] = useState(0.001);
+  const [mLambdaSize, setMLambdaSize] = useState(0.50);
+  const [mSizeCorr, setMSizeCorr] = useState(0.70);
 
   const [jobId, setJobId] = useState<string | null>(null);
   const [isLaunching, setIsLaunching] = useState(false);
@@ -110,19 +110,20 @@ export default function Workbench() {
     setMiningJobId(null);
     setMiningError(null);
     try {
+      // N38: values are already numbers — no parseInt/parseFloat needed
       const { job_id } = await apiFetch<{ job_id: string }>("/api/mining/start", {
         method: "POST",
         body: JSON.stringify({
           window: backtestWindow,
-          num_gen: parseInt(mPopSize) || 200,
-          max_K: parseInt(mMaxK) || 15,
-          wf_n_folds: parseInt(mFolds) || 5,
-          wf_embargo: parseInt(mEmbargo) || 5,
-          wf_purge: parseInt(mPurge) || 10,
-          lambda_std: parseFloat(mLambdaStd) || 2.0,
-          lambda_cx: parseFloat(mLambdaCx) || 0.003,
-          lambda_size: parseFloat(mLambdaSize) || 0.5,
-          size_corr_hard_limit: parseFloat(mSizeCorr) || 0.7,
+          num_gen: mPopSize || 200,
+          max_K: mMaxK || 15,
+          wf_n_folds: mFolds || 5,
+          wf_embargo: mEmbargo || 5,
+          wf_purge: mPurge || 10,
+          lambda_std: mLambdaStd || 2.0,
+          lambda_cx: mLambdaCx || 0.003,
+          lambda_size: mLambdaSize || 0.5,
+          size_corr_hard_limit: mSizeCorr || 0.7,
           neutralize,
           save_to_catalog: true,
         }),
@@ -164,7 +165,11 @@ export default function Workbench() {
           <Btn variant="ghost" onClick={() => navigate("/catalog")}>← Katalog</Btn>
           <Btn variant="ghost" onClick={() => navigate("/llm-trainer")}>↺ Tree-LSTM</Btn>
           <Btn variant="primary" onClick={handleRun} disabled={isRunning || !formula}>
-            {isRunning ? `Çalışıyor… ${Math.round(jobState.progress * 100)}%` : "▸ Run Backtest"}
+            {jobState.reconnecting
+              ? "Yeniden bağlanıyor…"
+              : isRunning
+              ? `Çalışıyor… ${Math.round(jobState.progress * 100)}%`
+              : "▸ Run Backtest"}
           </Btn>
         </>
       }
@@ -391,21 +396,21 @@ export default function Workbench() {
               <div>
                 <SectionLabel>MADENCİLİK</SectionLabel>
                 <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 6 }}>
-                  <Field label="Popülasyon Büyüklüğü" value={mPopSize} onChange={setMPopSize} hint="pop_size" />
-                  <Field label="Maksimum Uzunluk (K)" value={mMaxK} onChange={setMMaxK} hint="max_len" />
-                  <Field label="Mining içi fold sayısı" value={mFolds} onChange={setMFolds} hint="wf_folds" />
-                  <Field label="Fold embargo (gün)" value={mEmbargo} onChange={setMEmbargo} hint="embargo" />
-                  <Field label="Purge horizon (gün)" value={mPurge} onChange={setMPurge} hint="purge" />
+                  <Field label="Popülasyon Büyüklüğü" type="number" value={mPopSize} onChange={(v) => setMPopSize(Number(v) || 200)} hint="pop_size" />
+                  <Field label="Maksimum Uzunluk (K)" type="number" value={mMaxK} onChange={(v) => setMMaxK(Number(v) || 15)} hint="max_len" />
+                  <Field label="Mining içi fold sayısı" type="number" value={mFolds} onChange={(v) => setMFolds(Number(v) || 5)} hint="wf_folds" />
+                  <Field label="Fold embargo (gün)" type="number" value={mEmbargo} onChange={(v) => setMEmbargo(Number(v) || 5)} hint="embargo" />
+                  <Field label="Purge horizon (gün)" type="number" value={mPurge} onChange={(v) => setMPurge(Number(v) || 10)} hint="purge" />
                 </div>
               </div>
               <div>
                 <SectionLabel>NÖTRALİZASYON</SectionLabel>
                 <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 6 }}>
                   <Check label="Size / Vol / Mom" checked={neutralize} onChange={setNeutralize} />
-                  <Field label="λ_std (stabilite cezası)" value={mLambdaStd} onChange={setMLambdaStd} hint="lambda_std" />
-                  <Field label="λ_complexity" value={mLambdaCx} onChange={setMLambdaCx} hint="lambda_c" />
-                  <Field label="λ_size" value={mLambdaSize} onChange={setMLambdaSize} hint="lambda_size" />
-                  <Field label="Size-corr hard limit" value={mSizeCorr} onChange={setMSizeCorr} hint="size_lim" />
+                  <Field label="λ_std (stabilite cezası)" type="number" value={mLambdaStd} onChange={(v) => setMLambdaStd(Number(v) || 0.5)} hint="lambda_std" />
+                  <Field label="λ_complexity" type="number" value={mLambdaCx} onChange={(v) => setMLambdaCx(Number(v) || 0.001)} hint="lambda_c" />
+                  <Field label="λ_size" type="number" value={mLambdaSize} onChange={(v) => setMLambdaSize(Number(v) || 0.5)} hint="lambda_size" />
+                  <Field label="Size-corr hard limit" type="number" value={mSizeCorr} onChange={(v) => setMSizeCorr(Number(v) || 0.7)} hint="size_lim" />
                 </div>
               </div>
             </div>
@@ -413,7 +418,9 @@ export default function Workbench() {
             {/* Mining trigger + progress */}
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               <Btn variant="primary" onClick={handleMining} disabled={isMining}>
-                {isMining
+                {miningJob.reconnecting
+                  ? "Yeniden bağlanıyor…"
+                  : isMining
                   ? `Çalışıyor… ${Math.round(miningJob.progress * 100)}%`
                   : "▸ Çalıştır"}
               </Btn>

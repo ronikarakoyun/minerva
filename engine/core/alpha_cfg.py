@@ -15,7 +15,16 @@ import pandas as pd
 import random
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import List
+from typing import Any, List
+
+# ---------- Evaluate result cache (N1) ----------
+_EVAL_CACHE: dict[str, Any] = {}
+_EVAL_CACHE_MAXSIZE = 500
+
+
+def clear_eval_cache() -> None:
+    """Evaluate önbelleğini tamamen temizle."""
+    _EVAL_CACHE.clear()
 
 
 # ---------- AST düğümü (Definition 1: Abstract Syntax Representation) ----------
@@ -193,6 +202,12 @@ class AlphaCFG:
             temp = df
         else:
             temp = df.set_index(["Ticker", "Date"]).sort_index()
+
+        # N1: Önbellek kontrolü — (formül_string, df kimliği) anahtarı
+        cache_key = (str(node), id(temp))
+        if cache_key in _EVAL_CACHE:
+            return _EVAL_CACHE[cache_key]
+
         try:
             res = self._eval(node, temp)
             if np.isscalar(res):
@@ -200,9 +215,16 @@ class AlphaCFG:
             res = res.replace([np.inf, -np.inf], np.nan).fillna(0)
             # N2: [1%,99%] → [0.5%,99.5%] — daha az agresif tail kesimi
             lo, hi = res.quantile(0.005), res.quantile(0.995)
-            return res.clip(lo, hi)
+            result = res.clip(lo, hi)
         except Exception:
-            return pd.Series(np.zeros(len(temp)), index=temp.index)
+            result = pd.Series(np.zeros(len(temp)), index=temp.index)
+
+        # N1: Önbelleğe yaz; doluysa en eski %10'u tahliye et
+        if len(_EVAL_CACHE) >= _EVAL_CACHE_MAXSIZE:
+            for k in list(_EVAL_CACHE.keys())[:50]:
+                del _EVAL_CACHE[k]
+        _EVAL_CACHE[cache_key] = result
+        return result
 
     def _eval(self, n: Node, df: pd.DataFrame):
         if n.kind == "feature":

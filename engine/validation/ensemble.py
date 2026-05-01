@@ -178,3 +178,108 @@ class HallOfFame:
                 "Fitness": round(w.top_fitness, 4),
             })
         return pd.DataFrame(rows)
+
+
+# N18: Ensemble şampiyonu otomatik terfi ettirme — production entegrasyonu.
+
+def promote_ensemble_champion(
+    catalog,
+    alpha_cfg,
+    db: pd.DataFrame,
+    prob_df: "pd.DataFrame | None" = None,
+    top_k: int = 10,
+    regime_id: int = 0,
+) -> "dict | None":
+    """
+    N18: Katalogdan top-K formülü ensemble'a sok, en iyi skoru alanı rejim
+    şampiyonu olarak kaydet.
+
+    Parametreler
+    ------------
+    catalog : list
+        load_catalog() çıktısı — sıralanmış alpha kayıtları.
+    alpha_cfg : AlphaCFG
+        Formül değerlendirici.
+    db : pd.DataFrame
+        Flat market_db (backtest verisi).
+    prob_df : pd.DataFrame | None
+        HMM rejim olasılıkları (Date × K). Sağlanırsa ensemble ağırlıkları
+        rejim olasılığıyla ölçeklenir.
+    top_k : int
+        Katalogdan kaç formül alınacak (varsayılan 10).
+    regime_id : int
+        Hangi rejim için şampiyon kaydedilecek (varsayılan 0 = genel).
+
+    Döner
+    ------
+    dict | None
+        save_regime_champion çıktısı; başarısız/boş katalog → None.
+
+    Örnek kullanım (auto_minerva.py içinden)
+    ----------------------------------------
+    # N18: integrate_with_auto_minerva
+    # from engine.core.alpha_catalog import load_catalog
+    # from engine.validation.ensemble import promote_ensemble_champion
+    #
+    # catalog = load_catalog()
+    # result = promote_ensemble_champion(
+    #     catalog=catalog,
+    #     alpha_cfg=alpha_cfg,
+    #     db=db,
+    #     prob_df=prob_df,         # HMM olasılık matrisi (opsiyonel)
+    #     top_k=10,
+    #     regime_id=dominant_regime,
+    # )
+    # if result:
+    #     _log.info("N18: Ensemble şampiyonu terfi: %s", result.get("formula"))
+    """
+    from engine.core.alpha_catalog import save_regime_champion
+
+    if not catalog:
+        return None
+
+    # Top-K kayıt — ağırlık: prob_df yoksa IC, varsa rejim olasılığı × IC
+    top_records = catalog[:top_k]
+    if not top_records:
+        return None
+
+    best_record = None
+    best_score = -float("inf")
+
+    for rec in top_records:
+        tree = rec.get("tree")
+        formula = rec.get("formula", "")
+        if tree is None or not formula:
+            continue
+
+        # Ensemble ağırlığı: prob_df sağlandıysa o günkü dominant rejim olasılığı × IC
+        ic_val = abs(rec.get("rank_ic") or rec.get("ic") or 0.0)
+        if prob_df is not None and len(prob_df) > 0:
+            # Son satır: en güncel rejim dağılımı
+            last_probs = prob_df.iloc[-1]
+            regime_prob = float(last_probs.iloc[regime_id]) if regime_id < len(last_probs) else 1.0
+            score = ic_val * regime_prob
+        else:
+            score = ic_val
+
+        if score > best_score:
+            best_score = score
+            best_record = rec
+
+    if best_record is None:
+        return None
+
+    winner_formula = best_record.get("formula", "")
+    winner_tree = best_record.get("tree")
+    winner_ic = float(best_record.get("ic") or 0.0)
+    winner_rank_ic = float(best_record.get("rank_ic") or 0.0)
+    winner_adj_ic = float(best_record.get("adj_ic") or 0.0)
+
+    return save_regime_champion(
+        regime_id=regime_id,
+        formula=winner_formula,
+        tree=winner_tree,
+        ic=winner_ic,
+        rank_ic=winner_rank_ic,
+        adj_ic=winner_adj_ic,
+    )

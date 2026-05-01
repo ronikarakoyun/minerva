@@ -141,6 +141,9 @@ class GrammarMCTS:
             cur.children.append(
                 _MCTSNode(state=candidate, k_used=candidate.size(),
                           parent=cur, action="expand"))
+        # N12: Dead-branch prune — 4'ten fazla çocuk varsa N<2 olanları at
+        if len(cur.children) > 4:
+            cur.children = [c for c in cur.children if c.N >= 2] or cur.children[-2:]
         return random.choice(cur.children)
 
     def _rollout(self, leaf: _MCTSNode) -> float:

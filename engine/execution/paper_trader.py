@@ -381,7 +381,17 @@ def compute_realized_pnl(
             continue
 
         entry_px = df.at[i, "entry_px"]
-        gross = exit_px / entry_px - 1.0
+
+        # N10: Corporate action outlier guard — ratio >5x or <0.2x likely split/dividend day
+        gross_raw = exit_px / entry_px - 1.0
+        if abs(gross_raw) > 0.5:  # >50% in hold_days likely corporate action artifact
+            _log.warning(
+                "N10: %s gross_pnl_pct=%.1f%% (>50%%) — muhtemel bölünme/temettü, atlandı",
+                ticker, gross_raw * 100,
+            )
+            continue  # Bu satırı PnL hesaplamaya dahil etme
+
+        gross = gross_raw
         slip_pct = df.at[i, "slippage_bps"] / 1e4
 
         df.at[i, "exit_px"] = exit_px

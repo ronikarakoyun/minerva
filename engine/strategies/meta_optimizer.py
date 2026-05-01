@@ -31,10 +31,13 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import tempfile
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
+
+from filelock import FileLock
 
 import numpy as np
 import optuna
@@ -174,17 +177,149 @@ def run_meta_optimization(meta_cfg: Optional[MetaOptConfig] = None) -> dict:
     }
     meta_cfg.output_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = str(meta_cfg.output_path) + ".lock"
-    import fcntl
-    with open(lock_path, "w") as lf:
-        fcntl.flock(lf, fcntl.LOCK_EX)
+    output_dir = meta_cfg.output_path.parent
+
+    with FileLock(lock_path, timeout=15):
+        fd, tmp_path = tempfile.mkstemp(dir=output_dir, suffix=".tmp")
         try:
-            meta_cfg.output_path.write_text(json.dumps(best, indent=2, ensure_ascii=False))
-        finally:
-            fcntl.flock(lf, fcntl.LOCK_UN)
+            with open(fd, "w", encoding="utf-8") as f:
+                json.dump(best, f, indent=2, ensure_ascii=False)
+            Path(tmp_path).replace(meta_cfg.output_path)
+        except Exception:
+            try:
+                Path(tmp_path).unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
     logger.info("=== DONE — best_value=%.4f ===", best["best_value"])
     logger.info("best_params=%s", best["best_params"])
     logger.info("Saved: %s", meta_cfg.output_path)
     return best
+
+
+@dataclass
+class WindowTuneResult:
+    """Tek bir eğitim penceresi için ayar sonucu."""
+    window_index: int
+    start_date: Any          # pd.Timestamp
+    end_date: Any            # pd.Timestamp
+    best_value: float
+    best_params: dict
+
+
+@dataclass
+class RollingTuneResult:
+    """rolling_tune() çıktısı: pencere bazlı sonuçlar + mutabakat parametreler."""
+    window_results: list[WindowTuneResult]
+    consensus_params: dict   # Her parametre üzerinden medyan
+    best_window_index: int   # En yüksek best_value'ye sahip pencere
+    n_windows: int
+
+
+def rolling_tune(
+    db: pd.DataFrame,
+    cfg: Optional[MetaOptConfig] = None,
+    n_windows: int = 3,
+    window_days: int = 252,
+) -> RollingTuneResult:
+    """N14 — Çakışan birden fazla eğitim penceresinde tune() çalıştır.
+
+    Her pencere için ayrı bir Optuna study çalıştırılır; ardından her
+    hiperparametrenin medyanı "mutabakat" (consensus) parametre seti olarak
+    döndürülür. Bu sayede tek bir döneme aşırı uyum (overfitting) azaltılır.
+
+    Parametreler
+    ----------
+    db          : market_db.parquet içeriği (Date sütunu datetime).
+    cfg         : MetaOptConfig; None ise varsayılan kullanılır.
+    n_windows   : Oluşturulacak pencere sayısı (varsayılan 3).
+    window_days : Her pencerenin iş günü cinsinden uzunluğu (varsayılan 252).
+
+    Döndürür
+    -------
+    RollingTuneResult
+    """
+    cfg = cfg or MetaOptConfig()
+    if not logging.getLogger().handlers:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+            datefmt="%H:%M:%S",
+        )
+
+    db = db.copy()
+    db["Date"] = pd.to_datetime(db["Date"])
+    unique_dates = sorted(db["Date"].unique())
+    total_days = len(unique_dates)
+
+    if total_days < window_days:
+        raise ValueError(
+            f"DB'de {total_days} gün var, ancak window_days={window_days} gerekli."
+        )
+
+    # Pencereleri oluştur: son pencere en sondaki window_days günü kapsar;
+    # önceki pencereler geriye doğru kaydırılır.
+    step = max(1, (total_days - window_days) // max(1, n_windows - 1))
+    window_results: list[WindowTuneResult] = []
+    prob_df = _load_prob_df(cfg.prob_df_pkl)
+    alpha_cfg_obj = AlphaCFG()
+
+    for i in range(n_windows):
+        end_idx = total_days - i * step
+        start_idx = max(0, end_idx - window_days)
+        window_dates = unique_dates[start_idx:end_idx]
+        if len(window_dates) < 2:
+            logger.warning("Pencere %d çok kısa, atlanıyor.", i)
+            continue
+
+        start_date, end_date = window_dates[0], window_dates[-1]
+        window_db = db[db["Date"].isin(window_dates)].copy()
+        logger.info(
+            "Rolling tune pencere %d/%d: %s → %s (%d gün)",
+            i + 1, n_windows, start_date.date(), end_date.date(), len(window_dates),
+        )
+
+        sampler = optuna.samplers.TPESampler(seed=cfg.seed + i)
+        study = optuna.create_study(direction="maximize", sampler=sampler)
+        objective = build_objective(window_db, alpha_cfg_obj, prob_df, cfg)
+        study.optimize(objective, n_trials=cfg.n_trials, show_progress_bar=False)
+
+        window_results.append(WindowTuneResult(
+            window_index=i,
+            start_date=start_date,
+            end_date=end_date,
+            best_value=float(study.best_value),
+            best_params=dict(study.best_params),
+        ))
+        logger.info("Pencere %d tamamlandı — best_value=%.4f", i + 1, study.best_value)
+
+    if not window_results:
+        raise RuntimeError("Hiçbir pencere başarıyla tamamlanamadı.")
+
+    # Mutabakat: sayısal parametreler için medyan al
+    all_params_keys = window_results[0].best_params.keys()
+    consensus: dict = {}
+    for key in all_params_keys:
+        values = [wr.best_params[key] for wr in window_results]
+        if all(isinstance(v, int) for v in values):
+            consensus[key] = int(np.median(values))
+        else:
+            consensus[key] = float(np.median([float(v) for v in values]))
+
+    best_window_index = int(
+        np.argmax([wr.best_value for wr in window_results])
+    )
+    logger.info(
+        "Rolling tune tamamlandı — consensus=%s, best_window=%d",
+        consensus, best_window_index,
+    )
+
+    return RollingTuneResult(
+        window_results=window_results,
+        consensus_params=consensus,
+        best_window_index=best_window_index,
+        n_windows=len(window_results),
+    )
 
 
 def _parse_args() -> MetaOptConfig:

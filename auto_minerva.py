@@ -458,6 +458,29 @@ def task_morning_execution(db_path: Path, prob_path: Path) -> dict:
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Task 6 — N44: Stale job heartbeat cleanup
+# ──────────────────────────────────────────────────────────────────────
+@task(name="cleanup_stale_jobs", timeout_seconds=60)
+def task_cleanup_stale_jobs() -> dict:
+    """
+    N44: In-memory job registry'deki stale (5dk+ heartbeat yok) job'ları
+    "stale" statüsüne al ve SQLite'a persist et.
+    Bu task flow'a her çalışmada eklenir → restart sonrası zombie jobs temizlenir.
+    """
+    log = get_run_logger()
+    try:
+        from api.jobs import registry
+        before = len(registry._jobs)
+        registry.cleanup_old()
+        after = len(registry._jobs)
+        log.info("Stale job cleanup: %d → %d in-memory job", before, after)
+        return {"before": before, "after": after}
+    except Exception as exc:
+        log.warning("Stale job cleanup başarısız: %s", exc)
+        return {"error": str(exc)}
+
+
+# ──────────────────────────────────────────────────────────────────────
 # FLOW
 # ──────────────────────────────────────────────────────────────────────
 @flow(name="Minerva_Core_Loop", log_prints=True,
@@ -467,6 +490,9 @@ def run_daily_cycle(
     mining_n_trials: int = 50,
 ) -> dict:
     """Akşam: fetch + regime + (Cuma) mining + decay; Sabah: execution."""
+    # N44: Her çalışmada önce stale job'ları temizle
+    task_cleanup_stale_jobs()
+
     db_path = task_fetch_data()
     prob_path = task_detect_regime(db_path)
     mining_result = task_nightly_mining(
