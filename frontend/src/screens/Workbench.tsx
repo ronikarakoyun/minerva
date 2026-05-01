@@ -1,5 +1,5 @@
-import { useState } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
+import { useWorkbenchStore } from "../store/workbenchStore";
 import { CChrome } from "../components/chrome/CChrome";
 import { Btn } from "../components/atoms/Btn";
 import { Pill } from "../components/atoms/Pill";
@@ -42,24 +42,28 @@ export default function Workbench() {
 
   const { data: records = [] } = useCatalog();
 
-  const [backtestWindow, setBacktestWindow] = useState<"test" | "train" | "all">("test");
-  const [filterText, setFilterText] = useState("");
-  const [sourceFilter, setSourceFilter] = useState("EVO");
-  const [neutralize, setNeutralize] = useState(true);
+  const {
+    backtestWindow, setBacktestWindow,
+    filterText, setFilterText,
+    sourceFilter, setSourceFilter,
+    neutralize, setNeutralize,
+    mPopSize, setMPopSize,
+    mMaxK, setMMaxK,
+    mFolds, setMFolds,
+    mEmbargo, setMEmbargo,
+    mPurge, setMPurge,
+    mLambdaStd, setMLambdaStd,
+    mLambdaCx, setMLambdaCx,
+    mLambdaSize, setMLambdaSize,
+    mSizeCorr, setMSizeCorr,
+    jobId, setJobId,
+    isLaunching, setIsLaunching,
+    launchError, setLaunchError,
+    miningJobId, setMiningJobId,
+    miningLaunching, setMiningLaunching,
+    miningError, setMiningError,
+  } = useWorkbenchStore();
 
-  // Mining params — numeric state (N38: store as numbers to avoid string→API mismatch)
-  const [mPopSize, setMPopSize] = useState(300);
-  const [mMaxK, setMMaxK] = useState(15);
-  const [mFolds, setMFolds] = useState(5);
-  const [mEmbargo, setMEmbargo] = useState(5);
-  const [mPurge, setMPurge] = useState(10);
-  const [mLambdaStd, setMLambdaStd] = useState(0.50);
-  const [mLambdaCx, setMLambdaCx] = useState(0.001);
-  const [mLambdaSize, setMLambdaSize] = useState(0.50);
-  const [mSizeCorr, setMSizeCorr] = useState(0.70);
-
-  const [jobId, setJobId] = useState<string | null>(null);
-  const [isLaunching, setIsLaunching] = useState(false);
   const jobState = useJob(jobId);
 
   const activeRecord = records.find((r) => r.formula === activeId) ?? records[0] ?? null;
@@ -77,12 +81,7 @@ export default function Workbench() {
     return true;
   });
 
-  const [launchError, setLaunchError] = useState<string | null>(null);
-
   // Mining (evolution) job state
-  const [miningJobId, setMiningJobId] = useState<string | null>(null);
-  const [miningLaunching, setMiningLaunching] = useState(false);
-  const [miningError, setMiningError] = useState<string | null>(null);
   const miningJob = useJob(miningJobId);
   const isMining = miningLaunching || (!!miningJobId && !miningJob.done);
 
