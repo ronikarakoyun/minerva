@@ -85,7 +85,14 @@ def is_kill_switch_active() -> bool:
 
 
 def activate_kill_switch(reason: str = "") -> None:
-    """Kill-switch'i etkinleştir — yeni trade'leri engelle."""
+    """Kill-switch'i etkinleştir — yeni trade'leri engelle.
+
+    DISABLE_KILL_SWITCH=1 env var'ı set edilmişse dosya yazılmaz.
+    Bu sayede --no-kill-switch flag'i eşikleri aşılsa bile dosya oluşmuyor.
+    """
+    if os.getenv("DISABLE_KILL_SWITCH", "0") == "1":
+        _log.warning("KILL_SWITCH tetiklendi ama DISABLE_KILL_SWITCH=1 — dosya yazılmıyor. Sebep: %s", reason)
+        return
     import json as _json
     _KILL_SWITCH_PATH.parent.mkdir(parents=True, exist_ok=True)
     # N54: pd.Timestamp.utcnow() deprecated → datetime.now(timezone.utc)

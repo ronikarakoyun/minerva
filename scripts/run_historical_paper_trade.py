@@ -950,8 +950,9 @@ def main():
     # Gerçek trading'de bu flag kullanılmaz; default değerler korunur.
     if args.no_kill_switch:
         import os as _os
-        _os.environ["CUMULATIVE_DD_LIMIT"] = "-0.50"
-        _os.environ["DAILY_LOSS_LIMIT"]    = "-0.20"
+        _os.environ["CUMULATIVE_DD_LIMIT"]  = "-0.50"
+        _os.environ["DAILY_LOSS_LIMIT"]     = "-0.20"
+        _os.environ["DISABLE_KILL_SWITCH"]  = "1"   # activate_kill_switch() dosya yazmaz
         # Aktif kill switch dosyasını da temizle (bir önceki çalıştırmadan kalmış olabilir)
         _ks_path = Path("data/.kill_switch")
         if _ks_path.exists():
