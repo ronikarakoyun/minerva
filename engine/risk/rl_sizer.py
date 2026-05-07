@@ -113,6 +113,14 @@ class SizingEnv:
         rets_recent = np.diff(recent) / np.maximum(recent[:-1], 1e-10)
         std = float(np.std(rets_recent)) if len(rets_recent) > 1 else 1e-6
         reward = r_t / max(std, 1e-6)
+
+        # Drawdown cezası: yüksek kaldıraç + derin drawdown kombinasyonunu cezalandır.
+        # scale > 1.0 iken drawdown > %10 ise ceza uygulanır → mode collapse önleme.
+        peak = self._peak if self._peak > 1e-10 else 1.0
+        current_dd = max(0.0, 1.0 - float(eq_vals[self._t]) / peak)
+        if scale > 1.0 and current_dd > 0.10:
+            reward -= 2.0 * (scale - 1.0) * current_dd
+
         reward = float(np.clip(reward, -10.0, 10.0))
 
         # Peak update for drawdown
@@ -221,15 +229,20 @@ class MinimalPPOAgent(nn.Module):
         values = self.value(states).squeeze(-1)
         value_loss = F.mse_loss(values, returns)
 
-        loss = policy_loss + 0.5 * value_loss
+        # Entropi bonusu: politikanın erken tek eyleme kilitlenmesini önler.
+        # 0.01 katsayısı küçük ama mode collapse için yeterli; exploration–exploitation
+        # dengesini korur (PPO standardı: 0.01–0.05 arası).
+        entropy_bonus = dist.entropy().mean()
+        loss = policy_loss + 0.5 * value_loss - 0.01 * entropy_bonus
         self.opt.zero_grad()
         loss.backward()
         nn.utils.clip_grad_norm_(self.parameters(), max_norm=0.5)
         self.opt.step()
 
         return {
-            "policy_loss": float(policy_loss.item()),
-            "value_loss":  float(value_loss.item()),
+            "policy_loss":  float(policy_loss.item()),
+            "value_loss":   float(value_loss.item()),
+            "entropy":      float(entropy_bonus.item()),
         }
 
     def _collect_rollout(self, env: SizingEnv, max_steps: int = 252) -> list[dict]:

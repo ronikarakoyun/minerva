@@ -838,6 +838,68 @@ def run_walk_forward(
         eq_df.to_parquet(EQUITY_PATH, index=False)
         log.info("Equity yazıldı: %s (%d satır)", EQUITY_PATH.name, len(eq_df))
 
+    # ── Kurumsal tearsheet metrikleri ────────────────────────────────────────
+    def _compute_tearsheet(
+        eq_hist: list[float],
+        lev_hist: list[float],
+        rf_annual: float = 0.12,   # BIST proxy: ~%12 yıllık risk-free (TCMB ortalama)
+    ) -> dict:
+        if len(eq_hist) < 2:
+            return {}
+        eq_arr = np.array(eq_hist, dtype=float)
+        daily_rets = np.diff(eq_arr) / np.maximum(eq_arr[:-1], 1e-10)
+
+        rf_daily = rf_annual / 252
+        excess   = daily_rets - rf_daily
+        n_days   = len(daily_rets)
+        n_years  = n_days / 252.0
+
+        # Yıllık getiri (CAGR)
+        total_ret = eq_arr[-1] / eq_arr[0] - 1
+        cagr = (1 + total_ret) ** (1 / max(n_years, 1e-6)) - 1
+
+        # Sharpe (yıllıklaştırılmış)
+        ex_mean = float(np.mean(excess))
+        ex_std  = float(np.std(excess, ddof=1)) if n_days > 1 else 1e-6
+        sharpe  = (ex_mean / max(ex_std, 1e-10)) * np.sqrt(252)
+
+        # Sortino (downside std)
+        neg_excess = excess[excess < 0]
+        down_std   = float(np.std(neg_excess, ddof=1)) if len(neg_excess) > 1 else 1e-6
+        sortino    = (ex_mean / max(down_std, 1e-10)) * np.sqrt(252)
+
+        # Maximum Drawdown
+        running_max = np.maximum.accumulate(eq_arr)
+        drawdowns   = (eq_arr - running_max) / np.maximum(running_max, 1e-10)
+        mdd         = float(np.min(drawdowns))
+
+        # Calmar = CAGR / |MDD|
+        calmar = float(cagr / max(abs(mdd), 1e-6))
+
+        # Win rate (günlük pozitif getiri)
+        win_rate = float(np.mean(daily_rets > 0))
+
+        # Yıllık volatilite
+        annual_vol = float(ex_std * np.sqrt(252))
+
+        # Information Ratio (excess over zero benchmark = Sharpe, over rf = above)
+        ir = sharpe  # IR ≈ Sharpe için rf-adjusted excess
+
+        return {
+            "cagr_pct":        round(cagr * 100, 2),
+            "annual_vol_pct":  round(annual_vol * 100, 2),
+            "sharpe":          round(sharpe, 3),
+            "sortino":         round(sortino, 3),
+            "calmar":          round(calmar, 3),
+            "ir":              round(ir, 3),
+            "mdd_pct":         round(mdd * 100, 2),
+            "win_rate_pct":    round(win_rate * 100, 1),
+            "n_years":         round(n_years, 2),
+            "rf_annual_pct":   round(rf_annual * 100, 1),
+        }
+
+    tearsheet = _compute_tearsheet(equity_history, leverage_history)
+
     summary = {
         "trading_start": trading_start,
         "trading_end":   trading_end,
@@ -852,6 +914,7 @@ def run_walk_forward(
             if equity_history else 0.0
         ),
         "avg_leverage": float(np.mean(leverage_history)) if leverage_history else 1.0,
+        **tearsheet,
     }
     SUMMARY_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(SUMMARY_PATH, "w") as f:

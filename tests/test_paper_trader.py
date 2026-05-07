@@ -22,8 +22,10 @@ from engine.execution.slippage import SlippageConfig
 # ──────────────────────────────────────────────────────────────────────
 # 1. log_daily_decisions parquet'e append eder, şema doğru
 # ──────────────────────────────────────────────────────────────────────
-def test_log_daily_decisions_appends_parquet(syn_db, tmp_path):
+def test_log_daily_decisions_appends_parquet(syn_db, tmp_path, monkeypatch):
     """İki gün log → parquet 2× büyür, kolon şeması doğru."""
+    import engine.execution.paper_trader as _pt
+    monkeypatch.setattr(_pt, "is_kill_switch_active", lambda: False)
     out_path = tmp_path / "paper_trades.parquet"
     cfg = PaperTraderConfig(output_path=out_path, portfolio_capital_TL=1_000_000)
 
