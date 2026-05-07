@@ -791,15 +791,25 @@ def run_walk_forward(
             continue
 
         # H. Equity güncelle (paper_trades.parquet'ten)
-        # CRIT-1 FIX: paper_trader kolonları: net_pnl_pct + weight — status/net_pnl_TL yok.
-        # Kümülatif getiri: sum(net_pnl_pct_i * weight_i) tüm fill edilmiş satırlar için.
+        # Bileşik getiri (compounding): her günün ağırlıklı PnL'i ayrı dönem olarak hesaplanır.
+        # (1 + r1) * (1 + r2) * ... — basit toplam değil.
         try:
             if PAPER_TRADES_PATH.exists():
                 pt = pd.read_parquet(PAPER_TRADES_PATH)
                 filled = pt.dropna(subset=["net_pnl_pct"])
                 if len(filled) > 0:
-                    cum_pnl_pct = float((filled["net_pnl_pct"] * filled["weight"]).sum())
-                    equity_history.append(INITIAL_CAPITAL * (1.0 + cum_pnl_pct))
+                    filled = filled.copy()
+                    filled["date"] = pd.to_datetime(filled["date"])
+                    daily_ret = (
+                        filled.groupby("date")
+                        .apply(
+                            lambda g: float((g["net_pnl_pct"] * g["weight"]).sum()),
+                            include_groups=False,
+                        )
+                        .sort_index()
+                    )
+                    equity_val = float(INITIAL_CAPITAL * (1 + daily_ret).cumprod().iloc[-1])
+                    equity_history.append(equity_val)
                 else:
                     equity_history.append(equity_history[-1])
             else:

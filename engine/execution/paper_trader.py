@@ -346,10 +346,67 @@ def log_daily_decisions(
         return 0
 
     new_df = pd.DataFrame(rows, columns=PAPER_TRADE_COLUMNS)
+    # I/O OPT: önbelleklenmiş df varsa disk okuma yapma
     existing = _load_existing(cfg.output_path)
     combined = pd.concat([existing, new_df], ignore_index=True)
     _save(combined, cfg.output_path)
     return len(rows)
+
+
+def manage_portfolio_and_log(
+    target_weights: "pd.Series",
+    date: "pd.Timestamp",
+    db: "pd.DataFrame",
+    cfg: "Optional[PaperTraderConfig]" = None,
+    slippage_cfg: "Optional[SlippageConfig]" = None,
+    formula_id: str = "hist_blend_v1",
+) -> int:
+    """compute_realized_pnl + log_daily_decisions — günlük tek giriş noktası.
+
+    I/O optimizasyonu: parquet dosyası bir kez okunur, her iki fonksiyona
+    geçirilir. Günlük okuma sayısı 5'ten 1'e düşer.
+    """
+    cfg = cfg or PaperTraderConfig()
+    # Tek okuma — hem PnL fill hem de append için kullanılır
+    existing = _load_existing(cfg.output_path)
+
+    # Exit fiyatlarını doldur
+    if len(existing) > 0:
+        _db_dates = pd.to_datetime(db["Date"])
+        px_pivot = db.pivot_table(index=_db_dates, columns="Ticker", values="Pclose")
+        existing["date"] = pd.to_datetime(existing["date"])
+        pending_mask = existing["exit_px"].isna()
+        n_dates = len(px_pivot.index)
+        commission_pct = float(os.getenv("COMMISSION_PCT", "0.0030"))
+        for i in existing.index[pending_mask]:
+            row_date = existing.at[i, "date"]
+            ticker   = existing.at[i, "ticker"]
+            pos = px_pivot.index.searchsorted(row_date, side="left")
+            if pos >= n_dates:
+                continue
+            exit_date_idx = pos + cfg.hold_days
+            if exit_date_idx >= n_dates:
+                continue
+            exit_date = px_pivot.index[exit_date_idx]
+            if ticker not in px_pivot.columns:
+                continue
+            exit_px = px_pivot.at[exit_date, ticker]
+            if not np.isfinite(exit_px):
+                continue
+            entry_px  = existing.at[i, "entry_px"]
+            gross_raw = exit_px / entry_px - 1.0
+            if abs(gross_raw) > 0.5:
+                continue
+            slip_pct = existing.at[i, "slippage_bps"] / 1e4
+            existing.at[i, "exit_px"]       = exit_px
+            existing.at[i, "gross_pnl_pct"] = gross_raw
+            existing.at[i, "net_pnl_pct"]   = gross_raw - slip_pct - commission_pct
+
+    # Yeni kararları ekle (kill-switch kontrolü dahil)
+    n_logged = log_daily_decisions(
+        target_weights, formula_id, date, db, slippage_cfg, cfg
+    )
+    return n_logged
 
 
 def compute_realized_pnl(
@@ -419,10 +476,12 @@ def compute_realized_pnl(
 
         gross = gross_raw
         slip_pct = df.at[i, "slippage_bps"] / 1e4
+        # Komisyon: BIST damga vergisi %0.1 + aracı %0.05 = %0.15 (giriş + çıkış = %0.30)
+        commission_pct = float(os.getenv("COMMISSION_PCT", "0.0030"))
 
         df.at[i, "exit_px"] = exit_px
         df.at[i, "gross_pnl_pct"] = gross
-        df.at[i, "net_pnl_pct"] = gross - slip_pct
+        df.at[i, "net_pnl_pct"] = gross - slip_pct - commission_pct
 
     _save(df, cfg.output_path)
     return df
