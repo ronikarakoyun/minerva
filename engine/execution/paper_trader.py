@@ -127,8 +127,9 @@ def check_daily_loss_limit(cfg: Optional[PaperTraderConfig] = None) -> bool:
         return True
 
     daily_pnl = float((today_df["net_pnl_pct"] * today_df["weight"]).sum())
-    if daily_pnl < DAILY_LOSS_LIMIT:
-        reason = f"Günlük kayıp eşiği aşıldı: {daily_pnl:.3%} < {DAILY_LOSS_LIMIT:.1%}"
+    limit = float(os.getenv("DAILY_LOSS_LIMIT", str(DAILY_LOSS_LIMIT)))
+    if daily_pnl < limit:
+        reason = f"Günlük kayıp eşiği aşıldı: {daily_pnl:.3%} < {limit:.1%}"
         activate_kill_switch(reason)
         return False
     return True
@@ -170,8 +171,9 @@ def check_cumulative_drawdown(cfg: Optional[PaperTraderConfig] = None) -> bool:
     drawdown = (equity - running_max) / running_max
     max_dd = float(drawdown.min())
 
-    if max_dd < CUMULATIVE_DD_LIMIT:
-        reason = f"Kümülatif drawdown eşiği aşıldı: {max_dd:.2%} < {CUMULATIVE_DD_LIMIT:.0%}"
+    limit = float(os.getenv("CUMULATIVE_DD_LIMIT", str(CUMULATIVE_DD_LIMIT)))
+    if max_dd < limit:
+        reason = f"Kümülatif drawdown eşiği aşıldı: {max_dd:.2%} < {limit:.0%}"
         activate_kill_switch(reason)
         _log.critical("DRAWDOWN LIMIT: %s", reason)
         return False
