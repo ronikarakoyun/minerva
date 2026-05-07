@@ -32,6 +32,7 @@ class BlenderConfig:
     smoothing_alpha: float = 0.3       # EMA: w_t = α·w_new + (1-α)·w_{t-1}; 1.0 → smoothing yok
     min_weight: float = 0.01           # gürültü filtresi
     fallback_to_argmax: bool = True    # şampiyon eksikse rejim argmax
+    min_volume_TL: float = 1_000_000   # 20g ort. günlük TL hacim eşiği (Vlot × Pclose)
 
 
 def _evaluate_champion(tree: Node, df: pd.DataFrame, alpha_cfg) -> pd.Series:
@@ -154,12 +155,29 @@ def blend_regime_signals(
     blended = np.einsum("dtk,dk->dt", sig_stack, prob_arr)
     blended_df = pd.DataFrame(blended, index=common_dates, columns=common_tickers)
 
+    # Likidite maskesi: her gün için 20g ort. TL hacim < eşik → hisse seçilemez
+    # df'de Vlot ve Pclose varsa hesapla; yoksa filtre uygulanmaz.
+    liquid_mask: Optional[pd.DataFrame] = None
+    if cfg.min_volume_TL > 0 and df is not None and "Vlot" in df.columns and "Pclose" in df.columns:
+        try:
+            tl_vol = df.copy()
+            tl_vol["tl_vol"] = tl_vol["Vlot"] * tl_vol["Pclose"]
+            vol_wide = tl_vol.pivot_table(index="Date", columns="Ticker", values="tl_vol", aggfunc="mean")
+            vol_wide = vol_wide.reindex(index=common_dates, columns=common_tickers)
+            liquid_mask = vol_wide.rolling(20, min_periods=5).mean() >= cfg.min_volume_TL
+        except Exception:
+            liquid_mask = None
+
     # Top-K rank → ağırlık (eşit ağırlık top-K içinde)
     weights_df = pd.DataFrame(0.0, index=common_dates, columns=common_tickers)
     for d in common_dates:
         row = blended_df.loc[d]
         if row.isna().all():
             continue
+        # Likidite filtresi: eşiği geçemeyen hisseler sinyal sıralamasına alınmaz
+        if liquid_mask is not None and d in liquid_mask.index:
+            mask_row = liquid_mask.loc[d].fillna(False)
+            row = row.where(mask_row, other=np.nan)
         # En yüksek top_k sinyalli hisse
         ranked = row.dropna().nlargest(cfg.top_k)
         if len(ranked) == 0:
