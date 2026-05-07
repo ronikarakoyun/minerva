@@ -17,7 +17,8 @@ Backtest entegrasyonu opsiyoneldir (`risk_cfg=None` → mevcut 1/N pipeline ayne
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -33,6 +34,8 @@ class RiskConfig:
     vol_window: int = 20                # rolling std window (iş günü)
     min_scale: float = 0.1              # leverage tabanı
     max_scale: float = 3.0              # leverage tavanı
+    use_rl: bool = False                # False → mevcut vol-target davranışı
+    rl_agent_path: Optional[str] = None  # .pt dosyası yolu — use_rl=True ise yükle
 
 
 def compute_asset_vol(
@@ -119,3 +122,83 @@ def apply_vol_target(
         scaled_cols[ticker] = rets * scale
 
     return pd.DataFrame(scaled_cols, index=daily_returns.index)
+
+
+def apply_rl_sizer(
+    daily_returns: pd.DataFrame,
+    cfg: RiskConfig,
+    equity_curve: "pd.Series | None" = None,
+    regime_probs: "pd.DataFrame | None" = None,
+) -> pd.DataFrame:
+    """RL agent ile pozisyon ölçekleme (opt-in, cfg.use_rl=True).
+
+    use_rl=False (varsayılan) → `apply_vol_target` ile özdeş davranış.
+    use_rl=True  → Eğitilmiş MinimalPPOAgent'ı yükle ve her güne scale uygula.
+                    Agent yoksa veya yükleme başarısızsa vol-target fallback.
+
+    Parameters
+    ----------
+    daily_returns : (Date × Ticker) günlük getiri matrisi.
+    cfg           : RiskConfig — use_rl, rl_agent_path, use_vol_target.
+    equity_curve  : Opsiyonel portföy equity eğrisi (agent state için).
+    regime_probs  : Opsiyonel HMM prob_df (entropy hesabı için).
+
+    Returns
+    -------
+    pd.DataFrame — Ölçeklenmiş getiriler (apply_vol_target ile aynı şekil).
+    """
+    if not cfg.use_rl:
+        return apply_vol_target(daily_returns, cfg)
+
+    try:
+        import torch
+        from engine.risk.rl_sizer import MinimalPPOAgent, SizingEnv, _make_gbm_episodes
+
+        agent = MinimalPPOAgent()
+        if cfg.rl_agent_path is not None:
+            import os
+            if os.path.exists(cfg.rl_agent_path):
+                agent.load_state_dict(torch.load(cfg.rl_agent_path, weights_only=True))
+                agent.eval()
+            else:
+                import logging as _log
+                _log.getLogger(__name__).warning(
+                    "RL agent dosyası bulunamadı: %s — vol-target fallback.", cfg.rl_agent_path
+                )
+                return apply_vol_target(daily_returns, cfg)
+
+        # Equity curve yoksa portföy eşit ağırlıklı kümülatif getiri
+        if equity_curve is None:
+            eq = (1 + daily_returns.fillna(0.0).mean(axis=1)).cumprod()
+        else:
+            eq = equity_curve
+
+        # RL agent ile her gün için scale faktörü üret
+        import random as _random
+        _random.seed(0)
+        gbm_eq, gbm_reg, gbm_vol = _make_gbm_episodes(n_episodes=5, n_steps=len(eq))
+        env = SizingEnv(
+            equity_episodes=[eq] + gbm_eq,
+            regime_episodes=[regime_probs if regime_probs is not None else gbm_reg[0]] + gbm_reg,
+            vol_episodes=[pd.DataFrame({"vol": np.ones(len(eq))}) ] + gbm_vol,
+        )
+        obs = env.reset()
+        scales = []
+        for _ in range(len(daily_returns)):
+            action, _ = agent.act(obs)
+            from engine.risk.rl_sizer import ACTIONS
+            scale = ACTIONS[action]
+            scales.append(scale)
+            obs, _, done, _ = env.step(action)
+            if done:
+                obs = env.reset()
+
+        scale_series = pd.Series(scales[:len(daily_returns)], index=daily_returns.index)
+        return daily_returns.multiply(scale_series, axis=0)
+
+    except Exception as exc:
+        import logging as _log
+        _log.getLogger(__name__).warning(
+            "RL sizer başarısız (%s) — vol-target fallback.", exc
+        )
+        return apply_vol_target(daily_returns, cfg)

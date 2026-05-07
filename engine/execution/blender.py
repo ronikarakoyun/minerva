@@ -87,7 +87,27 @@ def blend_regime_signals(
         sig_mi = _evaluate_champion(champion_trees[k], df, alpha_cfg)
         # MultiIndex (Ticker, Date) → wide (Date × Ticker)
         if isinstance(sig_mi.index, pd.MultiIndex):
-            sig_wide = sig_mi.unstack("Ticker")
+            # unstack("Ticker") başarısız olur: bazı formüllerin çıktısında
+            # "Ticker" level adı birden fazla kez geçebilir (pandas hatası).
+            # Güvenli yol: reset_index → pivot_table (isimsiz level'e bağımlı değil).
+            flat = sig_mi.reset_index()
+            # Sütunlar: Ticker, Date, 0 (veya farklı isimler) — son sütun değer
+            val_col = flat.columns[-1]
+            # Ticker ve Date sütunlarını bul (birden fazla Ticker varsa ilkini al)
+            ticker_cols = [c for c in flat.columns if str(c).lower() == "ticker"]
+            date_cols   = [c for c in flat.columns if str(c).lower() == "date"]
+            if ticker_cols and date_cols:
+                sig_wide = flat.pivot_table(
+                    index=date_cols[0], columns=ticker_cols[0], values=val_col, aggfunc="mean"
+                )
+                sig_wide.columns.name = "Ticker"
+                sig_wide.index.name   = "Date"
+            else:
+                # Fallback: level pozisyonuyla unstack (0=Ticker, 1=Date varsayımı)
+                try:
+                    sig_wide = sig_mi.unstack(level=0)
+                except Exception:
+                    sig_wide = sig_mi.unstack(level=-1)
         else:
             # Flat — varsay Date index
             sig_wide = sig_mi.to_frame().T

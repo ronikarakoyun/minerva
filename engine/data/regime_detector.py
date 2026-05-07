@@ -66,6 +66,11 @@ class RegimeConfig:
     # False → Forward-Backward (Smoothed) — daha pürüzsüz ama geçmiş noktaları
     #         gelecek veriyle hesaplar; yalnızca gerçek zamanlı son gün tahmini için uygun.
     use_filtered_probs: bool = True
+    # Faz 1 / Fractional Differentiation — opt-in (default=False, eski davranış korunur).
+    # True → Log_Return özelliği log(Close).diff() yerine fracdiff_ffd ile üretilir.
+    # d_star değerleri data/fracdiff_d.json'dan okunur (bkz. engine/data/fracdiff.py).
+    use_fracdiff: bool = False
+    fracdiff_cache_path: Path = field(default_factory=lambda: Path("data/fracdiff_d.json"))
 
 
 FEATURES = ["Log_Return", "Norm_ATR_14", "Volume_Accel", "Choppiness"]
@@ -111,7 +116,16 @@ def compute_features(
         (scaled_features DataFrame, fit edilmiş scaler)
     """
     out = pd.DataFrame(index=df.index)
-    out["Log_Return"] = np.log(df["Close"] / df["Close"].shift(1))
+
+    if cfg.use_fracdiff:
+        from engine.data.fracdiff import frac_diff_ffd, load_fracdiff_cache
+        log_px = np.log(df["Close"])
+        cache = load_fracdiff_cache(cfg.fracdiff_cache_path)
+        d_star = cache.get(cfg.ticker, {}).get("d_star", 1.0)
+        out["Log_Return"] = frac_diff_ffd(log_px, d=d_star).reindex(df.index)
+        logger.info("Fracdiff: ticker=%s d_star=%.2f", cfg.ticker, d_star)
+    else:
+        out["Log_Return"] = np.log(df["Close"] / df["Close"].shift(1))
 
     # True range → ATR_14 → Close ile normalize
     high_low = df["High"] - df["Low"]

@@ -15,10 +15,15 @@ Not: Bu fonksiyon Streamlit'e BAĞIMLI DEĞİL. Progress callback opsiyonel.
 from __future__ import annotations
 
 import json
+import logging
 import random
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
+
+from ..util.checkpoint import Checkpoint
+
+logger = logging.getLogger(__name__)
 
 import numpy as np
 import pandas as pd
@@ -63,6 +68,10 @@ class MiningConfig:
     c_puct: float = 1.4                   # PUCT exploration weight
     mcts_rollouts: int = 16               # value_fn yoksa rollout sayısı
     mcts_iterations_per_root: int = 50    # her formül için MCTS arama bütçesi
+    # Faz 3 Uyuyan Devler — varsayılan False (geriye dönük uyumluluk)
+    use_dml_neutralize: bool = False      # PR-8: DML (Neyman-ortogonal) nötralizasyon
+    use_attention: bool = False           # PR-10: Tree-LSTM Bahdanau attention
+    dropout_p: float = 0.0               # PR-10: MC Dropout (0→kapalı)
 
     @classmethod
     def from_best_params(
@@ -111,6 +120,9 @@ def run_mining_window(
     factor_cache: "pd.DataFrame | None" = None,
     regime: "pd.Series | None" = None,
     progress_cb: "Callable[[int, int], None] | None" = None,
+    checkpoint_id: "str | None" = None,
+    checkpoint_every: int = 50,
+    resume: bool = False,
 ) -> list[MiningResult]:
     """
     Bir train penceresi üzerinde tam mining döngüsü (Faz 1 + 2 + 3).
@@ -131,6 +143,12 @@ def run_mining_window(
         Rejim serisi.
     progress_cb : callable, opsiyonel
         progress_cb(done, total) — UI progress bar güncelleme.
+    checkpoint_id : str, opsiyonel
+        Her `checkpoint_every` adımda bu ID ile kaydet.
+    checkpoint_every : int
+        Kaç formülde bir checkpoint alınacağı (varsayılan: 50).
+    resume : bool
+        True ise `checkpoint_id` dosyasından kaldığı yerden devam et.
 
     Döner
     ------
@@ -145,6 +163,9 @@ def run_mining_window(
         return _run_mining_window_impl(
             db_window, cfg, mining_cfg,
             seed_trees, factor_cache, regime, progress_cb,
+            checkpoint_id=checkpoint_id,
+            checkpoint_every=checkpoint_every,
+            resume=resume,
         )
     finally:
         # Global random state'i geri yükle (reentrancy için)
@@ -160,6 +181,9 @@ def _run_mining_window_impl(
     factor_cache: "pd.DataFrame | None",
     regime: "pd.Series | None",
     progress_cb: "Callable[[int, int], None] | None",
+    checkpoint_id: "str | None" = None,
+    checkpoint_every: int = 50,
+    resume: bool = False,
 ) -> list[MiningResult]:
     # ── Veri hazırlığı ──────────────────────────────────────────────
     db_w = db_window.copy()
@@ -211,9 +235,61 @@ def _run_mining_window_impl(
                     prior[_key] = max(prior.get(_key, 0.0), min(float(_ic), 1.0))
         except Exception:
             pass  # Replay buffer erişim hatası — prior olmadan devam et
+        # PR-10: Attention + MC-Dropout Tree-LSTM value function (opt-in)
+        # CRIT-2 FIX: build_token_vocab(cfg) kullan — cfg.vocab attr yok.
+        # ARCH-1 FIX: dropout > 0 ise predict_value_with_uncertainty (Bayesian).
+        # GAP-2  FIX: policy_value_net.pt checkpoint varsa yükle.
+        _value_fn = None
+        if mcfg.use_attention:
+            try:
+                import torch as _torch
+                from engine.ml.tree_lstm import (
+                    PolicyValueNet as _PVNet,
+                    build_token_vocab,
+                    build_action_vocab,
+                )
+                _vocab = build_token_vocab(cfg)          # CRIT-2: gerçek vocab
+                _vocab_size = max(len(_vocab), 32)
+                _action_size = max(len(build_action_vocab(cfg)), 8)
+                _pvnet = _PVNet(
+                    token_vocab_size=_vocab_size,
+                    action_size=_action_size,
+                    use_attention=True,
+                    dropout_p=mcfg.dropout_p,
+                )
+                # GAP-2: Önceden eğitilmiş checkpoint varsa yükle
+                _pvnet_ckpt = Path("data/policy_value_net.pt")
+                if _pvnet_ckpt.exists():
+                    try:
+                        _pvnet.load_state_dict(
+                            _torch.load(_pvnet_ckpt, weights_only=True)
+                        )
+                        logger.debug("PolicyValueNet checkpoint yüklendi: %s", _pvnet_ckpt)
+                    except Exception as _le:
+                        logger.debug(
+                            "PolicyValueNet checkpoint yüklenemedi (%s) — random init", _le
+                        )
+                _pvnet.eval()
+
+                # ARCH-1 FIX: dropout > 0 → MC Dropout ile Bayesian uncertainty
+                # Pessimistic value = mean - std (uncertainty cezası) → MCTS
+                # aşırı güvenden kaçınır, keşif dengesini korur.
+                if mcfg.dropout_p > 0:
+                    def _value_fn(node):  # noqa: E731
+                        mean_v, std_v = _pvnet.predict_value_with_uncertainty(
+                            node, _vocab, n_mc=10
+                        )
+                        return mean_v - std_v   # Bayesian pessimistic estimate
+                else:
+                    def _value_fn(node):  # noqa: E731
+                        return _pvnet.predict_value(node, _vocab)
+            except Exception as _e:
+                logger.debug("PolicyValueNet oluşturulamadı (%s) — value_fn=None", _e)
+                _value_fn = None
         searcher = GrammarMCTS(
             cfg, max_K=mcfg.max_K, c_puct=mcfg.c_puct,
             rollouts=mcfg.mcts_rollouts, subtree_prior=prior,
+            value_fn=_value_fn,
         )
         pool: list[Node] = [
             searcher.search(iterations=mcfg.mcts_iterations_per_root)
@@ -244,6 +320,7 @@ def _run_mining_window_impl(
         factor_cache=factor_cache,
         lambda_size=mcfg.lambda_size,
         size_corr_hard_limit=mcfg.size_corr_hard_limit,
+        use_dml=mcfg.use_dml_neutralize,   # PR-8: DML nötralizasyon (varsayılan False)
     )
 
     # Faz 2: Rejim-koşullu ağırlık serisi (opsiyonel)
@@ -252,12 +329,39 @@ def _run_mining_window_impl(
     if use_weighted:
         regime_weights = compute_regime_weights(mcfg.prob_df, mcfg.weight_cfg)
 
+    # ── Checkpoint / Resume ──────────────────────────────────────────────────
+    ckpt: Optional[Checkpoint] = None
+    start_from = 0
     results: list[MiningResult] = []
+
+    if checkpoint_id:
+        ckpt = Checkpoint.new(checkpoint_id)
+        if resume and ckpt.exists():
+            try:
+                state = ckpt.read()
+                start_from = state.done_i + 1
+                results = state.results
+                random.setstate(state.rng_state)
+                np.random.set_state(state.np_rng_state)
+                logger.info(
+                    "Checkpoint resume: %s  başlangıç=%d  mevcut=%d sonuç",
+                    checkpoint_id, start_from, len(results),
+                )
+            except Exception as exc:
+                logger.warning("Checkpoint okunamadı (%s) — baştan başlanıyor: %s", checkpoint_id, exc)
+                start_from = 0
+                results = []
+    # ────────────────────────────────────────────────────────────────────────
+
     n_pool = len(pool)
     for done_i, tree in enumerate(pool):
+        if done_i < start_from:
+            continue
+
         if progress_cb:
             progress_cb(done_i, n_pool)
 
+        accepted = False
         if mcfg.use_wf_fitness and mining_folds and len(mining_folds) >= 3:
             try:
                 if use_weighted:
@@ -274,49 +378,59 @@ def _run_mining_window_impl(
                         regime=regime, **wf_kwargs,
                     )
             except Exception:
-                continue
+                stats = None
         else:
             # Klasik IC modu
             try:
                 sig = cfg.evaluate(tree, idx)
                 if sig is None or len(sig) == 0:
-                    continue
-                tmp = pd.DataFrame({
-                    "Signal": sig.values,
-                    "Target": idx[mcfg.target_col].values if mcfg.target_col in idx.columns else np.nan,
-                }).dropna()
-                if len(tmp) < 20:
-                    continue
-                ic = float(tmp["Signal"].corr(tmp["Target"], method="spearman"))
-                stats = {
-                    "status": "ok" if not np.isnan(ic) else "invalid",
-                    "fitness": ic, "mean_ric": ic, "std_ric": 0.0,
-                    "pos_folds": 1 if ic > 0 else 0, "size_corr": 0.0,
-                    "regime_breakdown": None,
-                }
+                    stats = None
+                else:
+                    tmp = pd.DataFrame({
+                        "Signal": sig.values,
+                        "Target": idx[mcfg.target_col].values if mcfg.target_col in idx.columns else np.nan,
+                    }).dropna()
+                    if len(tmp) < 20:
+                        stats = None
+                    else:
+                        ic = float(tmp["Signal"].corr(tmp["Target"], method="spearman"))
+                        stats = {
+                            "status": "ok" if not np.isnan(ic) else "invalid",
+                            "fitness": ic, "mean_ric": ic, "std_ric": 0.0,
+                            "pos_folds": 1 if ic > 0 else 0, "size_corr": 0.0,
+                            "regime_breakdown": None,
+                        }
             except Exception:
-                continue
+                stats = None
 
-        if stats.get("status") != "ok":
-            continue
+        if stats and stats.get("status") == "ok":
+            n_folds_v = len(stats.get("fold_rics", [1]))
+            pos_ratio = stats["pos_folds"] / max(n_folds_v, 1)
+            if stats["mean_ric"] >= mcfg.min_mean_ric and pos_ratio >= mcfg.min_pos_ratio:
+                results.append(MiningResult(
+                    formula=str(tree),
+                    tree=tree,
+                    fitness=float(stats["fitness"]),
+                    mean_ric=float(stats["mean_ric"]),
+                    std_ric=float(stats.get("std_ric", 0.0)),
+                    pos_folds=int(stats["pos_folds"]),
+                    n_folds=n_folds_v,
+                    size_corr=float(stats.get("size_corr", 0.0)),
+                    status=stats["status"],
+                    regime_breakdown=stats.get("regime_breakdown"),
+                ))
+                accepted = True
 
-        n_folds_v = len(stats.get("fold_rics", [1]))
-        pos_ratio = stats["pos_folds"] / max(n_folds_v, 1)
-        if stats["mean_ric"] < mcfg.min_mean_ric or pos_ratio < mcfg.min_pos_ratio:
-            continue
-
-        results.append(MiningResult(
-            formula=str(tree),
-            tree=tree,
-            fitness=float(stats["fitness"]),
-            mean_ric=float(stats["mean_ric"]),
-            std_ric=float(stats.get("std_ric", 0.0)),
-            pos_folds=int(stats["pos_folds"]),
-            n_folds=n_folds_v,
-            size_corr=float(stats.get("size_corr", 0.0)),
-            status=stats["status"],
-            regime_breakdown=stats.get("regime_breakdown"),
-        ))
+        # Checkpoint done_i bazında tetiklenir (başarısız formüller de sayılarak —
+        # böylece 200 formüllük pool'da 50'de bir kayıt garantisi olur)
+        if ckpt and checkpoint_every > 0 and (done_i + 1) % checkpoint_every == 0:
+            ckpt.save(
+                done_i=done_i,
+                pool=pool,
+                results=results,
+                rng_state=random.getstate(),
+                np_rng_state=np.random.get_state(),
+            )
 
     if progress_cb:
         progress_cb(n_pool, n_pool)

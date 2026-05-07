@@ -63,19 +63,28 @@ def build_action_vocab(cfg: AlphaCFG) -> List[Tuple[str, str]]:
 # Child-Sum Tree-LSTM hücresi (Tai et al. 2015)
 # -----------------------------------------------------------------
 class ChildSumTreeLSTMCell(nn.Module):
-    def __init__(self, in_dim: int, hid_dim: int):
+    def __init__(self, in_dim: int, hid_dim: int, use_attention: bool = False):
         super().__init__()
         self.hid_dim = hid_dim
+        self.use_attention = use_attention
         self.W_iou = nn.Linear(in_dim, 3 * hid_dim)
         self.U_iou = nn.Linear(hid_dim, 3 * hid_dim, bias=False)
         self.W_f   = nn.Linear(in_dim, hid_dim)
         self.U_f   = nn.Linear(hid_dim, hid_dim, bias=False)
+        # Bahdanau additive attention (use_attention=True ise aktif)
+        if use_attention:
+            self.attn_score = nn.Linear(hid_dim, 1, bias=False)
 
     def forward(self, x: torch.Tensor,
                 ch_h: List[torch.Tensor], ch_c: List[torch.Tensor]):
-        # child-sum
         if ch_h:
-            h_sum = torch.stack(ch_h, 0).sum(0)
+            if self.use_attention and len(ch_h) > 1:
+                stacked = torch.stack(ch_h, 0)           # (n_children, hid)
+                scores = self.attn_score(stacked)         # (n_children, 1)
+                weights = torch.softmax(scores, dim=0)    # normalize
+                h_sum = (weights * stacked).sum(dim=0)    # ağırlıklı sum
+            else:
+                h_sum = torch.stack(ch_h, 0).sum(0)
         else:
             h_sum = torch.zeros(self.hid_dim, device=x.device)
         iou = self.W_iou(x) + self.U_iou(h_sum)
@@ -93,10 +102,11 @@ class ChildSumTreeLSTMCell(nn.Module):
 
 class TreeLSTMEncoder(nn.Module):
     """Post-order dolaşımla ASR'yi sabit boyutlu vektöre gömen encoder."""
-    def __init__(self, vocab_size: int, emb_dim: int = 32, hid_dim: int = 64):
+    def __init__(self, vocab_size: int, emb_dim: int = 32, hid_dim: int = 64,
+                 use_attention: bool = False):
         super().__init__()
         self.emb  = nn.Embedding(vocab_size, emb_dim)
-        self.cell = ChildSumTreeLSTMCell(emb_dim, hid_dim)
+        self.cell = ChildSumTreeLSTMCell(emb_dim, hid_dim, use_attention=use_attention)
         self.hid_dim = hid_dim
 
     def _encode(self, node: Node, vocab: Dict[Tuple[str, str], int]):
@@ -118,9 +128,12 @@ class TreeLSTMEncoder(nn.Module):
 # -----------------------------------------------------------------
 class PolicyValueNet(nn.Module):
     def __init__(self, token_vocab_size: int, action_size: int,
-                 emb_dim: int = 32, hid_dim: int = 64):
+                 emb_dim: int = 32, hid_dim: int = 64,
+                 use_attention: bool = False, dropout_p: float = 0.0):
         super().__init__()
-        self.encoder     = TreeLSTMEncoder(token_vocab_size, emb_dim, hid_dim)
+        self.encoder     = TreeLSTMEncoder(token_vocab_size, emb_dim, hid_dim,
+                                           use_attention=use_attention)
+        self.drop        = nn.Dropout(p=dropout_p)
         self.policy_head = nn.Linear(hid_dim, action_size)
         self.value_head  = nn.Sequential(
             nn.Linear(hid_dim, hid_dim // 2),
@@ -146,6 +159,25 @@ class PolicyValueNet(nn.Module):
         self.eval()
         logits, _ = self.forward(node, vocab)
         return F.softmax(logits, dim=-1)
+
+    def predict_value_with_uncertainty(
+        self, node: Node, vocab, n_mc: int = 20
+    ) -> "tuple[float, float]":
+        """MC Dropout ile epistemic belirsizlik tahmini.
+
+        Dropout aktifken n_mc kez forward pass → (mean, std) döner.
+        dropout_p=0.0 ise std ≈ 0 (deterministik).
+        """
+        import numpy as np
+        self.train()  # Dropout aktif
+        samples = []
+        with torch.no_grad():
+            for _ in range(n_mc):
+                h = self.encoder(node, vocab)
+                v = self.value_head(self.drop(h)).squeeze(-1)
+                samples.append(float(v.item()))
+        self.eval()
+        return float(np.mean(samples)), float(np.std(samples))
 
     @torch.no_grad()
     def predict_policy_masked(

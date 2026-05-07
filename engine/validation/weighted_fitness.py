@@ -194,6 +194,7 @@ def compute_weighted_wf_fitness(
     factor_cache: "pd.DataFrame | None" = None,
     lambda_size: float = 0.5,
     size_corr_hard_limit: float = 0.7,
+    use_dml: bool = False,           # PR-8: OLS yerine DML nötralizasyon
 ) -> dict:
     """
     Rejim-koşullu ağırlıklı WF-fitness.
@@ -248,7 +249,7 @@ def compute_weighted_wf_fitness(
 
     if neutralize:
         try:
-            sig = neutralize_signal(sig, idx, factors=factor_cache)
+            sig = neutralize_signal(sig, idx, factors=factor_cache, use_dml=use_dml)
         except Exception:
             pass
 

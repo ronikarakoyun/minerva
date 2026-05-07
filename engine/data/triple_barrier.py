@@ -121,10 +121,12 @@ def compute_triple_barrier_labels(
 
     df_labels = pd.DataFrame(labels).set_index(["Ticker", "Date"]).sort_index()
     label_series = df_labels["TB_Label"]
+    weight_series = df_labels["TB_Weight"]
     if return_weights:
-        weight_series = df_labels["TB_Weight"]
+        # N8: Son horizon günleri dahil, weight=0 ile; eğitimde sample_weight kullanılır.
         return label_series, weight_series
-    return label_series
+    # return_weights=False: look-ahead-safe etiketler — 0-weight satırlar dışarıda.
+    return label_series[weight_series > 0]
 
 
 def add_triple_barrier_to_idx(

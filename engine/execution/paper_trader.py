@@ -42,9 +42,11 @@ SLIPPAGE_CAP_BPS: float = float(os.getenv("SLIPPAGE_CAP_BPS", "200.0"))
 # Eğer bu dosya varsa tüm yeni paper-trade kararları engellenir.
 _KILL_SWITCH_PATH: Path = Path("data/.kill_switch")
 # Günlük maksimum kayıp eşiği (portföy ağırlıklı PnL) — N26
-DAILY_LOSS_LIMIT: float = -0.03   # -%3
+# Env var ile override: DAILY_LOSS_LIMIT=-0.50 (tarihsel simülasyon için)
+DAILY_LOSS_LIMIT: float = float(os.getenv("DAILY_LOSS_LIMIT", "-0.03"))    # -%3 default
 # N27: Kümülatif drawdown eşiği — bu değeri aşınca kill-switch aktif edilir
-CUMULATIVE_DD_LIMIT: float = -0.10  # -%10
+# Env var ile override: CUMULATIVE_DD_LIMIT=-0.50 (tarihsel simülasyon için)
+CUMULATIVE_DD_LIMIT: float = float(os.getenv("CUMULATIVE_DD_LIMIT", "-0.10"))  # -%10 default
 
 
 # N25: Kill-switch dosyası bu süre sonra otomatik süresi dolar (24h TTL).
@@ -255,21 +257,45 @@ def log_daily_decisions(
     if len(active) == 0:
         return 0
 
-    # O günkü fiyatlar
-    db_today = db[db["Date"] == date]
-    if len(db_today) == 0:
+    # Look-ahead bias düzeltmesi (N-LA):
+    # Sinyal T günü kapanışında hesaplanır; emir T+1 sabahı çalıştırılır.
+    # entry_px = Popen_{T+1}. Yoksa (veri sonu, tatil vb.) Pclose_T'ye düş.
+    all_dates_sorted = sorted(db["Date"].unique())
+    date_idx = None
+    try:
+        date_idx = all_dates_sorted.index(date)
+    except ValueError:
+        pass
+
+    if date_idx is not None and date_idx + 1 < len(all_dates_sorted):
+        next_date = all_dates_sorted[date_idx + 1]
+        db_next = db[db["Date"] == next_date]
+        if "Popen" in db_next.columns and len(db_next) > 0:
+            px_lookup = db_next.set_index("Ticker")["Popen"].to_dict()
+        else:
+            # Popen yoksa T+1 Pclose
+            px_lookup = db_next.set_index("Ticker")["Pclose"].to_dict() if len(db_next) > 0 else {}
+    else:
+        px_lookup = {}
+
+    # Fallback: T+1 veri yoksa (veri sonu) T günü Pclose kullan
+    if not px_lookup:
+        db_today = db[db["Date"] == date]
+        px_lookup = db_today.set_index("Ticker")["Pclose"].to_dict() if len(db_today) > 0 else {}
+
+    if not px_lookup:
         return 0
 
-    px_lookup = db_today.set_index("Ticker")["Pclose"].to_dict()
-
     # σ ve ADV — slipaj hesabı için
-    db_window = db[db["Date"] <= date].copy()
+    # ARCH-2 FIX: .copy() kaldırıldı (Anayasa 1.3 — sıfır kopyalama).
+    # Date dönüşümü için view üzerinde çalış; mutasyon yok.
+    db_window = db[db["Date"] <= date]
     adv_df = compute_adv(db_window, CapacityConfig(adv_window=slip_cfg.adv_window))
 
-    # Günlük getiri serisi (her ticker için)
-    db_window["Date"] = pd.to_datetime(db_window["Date"])
+    # Günlük getiri serisi (her ticker için) — pivot index'e dönüştürülmüş Date ver
+    _dates_w = pd.to_datetime(db_window["Date"])
     ret_wide = (
-        db_window.pivot_table(index="Date", columns="Ticker", values="Pclose")
+        db_window.pivot_table(index=_dates_w, columns="Ticker", values="Pclose")
         .pct_change()
     )
 
@@ -345,9 +371,9 @@ def compute_realized_pnl(
     if len(df) == 0:
         return df
 
-    db = db.copy()
-    db["Date"] = pd.to_datetime(db["Date"])
-    px_pivot = db.pivot_table(index="Date", columns="Ticker", values="Pclose")
+    # ARCH-2 FIX: .copy() kaldırıldı — pivot index için dönüştürülmüş Date sütunu kullan.
+    _db_dates = pd.to_datetime(db["Date"])
+    px_pivot = db.pivot_table(index=_db_dates, columns="Ticker", values="Pclose")
 
     df["date"] = pd.to_datetime(df["date"])
 

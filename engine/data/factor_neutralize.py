@@ -156,6 +156,59 @@ def _bin_demean(
 
 
 # ---------------------------------------------------------------------------
+# DML cross-fit residualization
+# ---------------------------------------------------------------------------
+
+def _dml_residualize(
+    signal_arr: np.ndarray,
+    factor_arr: np.ndarray,
+    n_splits: int = 2,
+) -> np.ndarray:
+    """Neyman-orthogonal cross-fit residualization (Double Machine Learning).
+
+    Her fold'da out-of-fold RidgeCV tahmini yapılır; sinyal artığı
+    faktör korelasyonundan Neyman-orthogonal biçimde temizlenir.
+
+    Parameters
+    ----------
+    signal_arr  : rank-normalized sinyal (n_samples,)
+    factor_arr  : rank-normalized faktör matrisi (n_samples, n_factors)
+    n_splits    : KFold bölüm sayısı (önerilir: 5)
+
+    Returns
+    -------
+    np.ndarray  : cross-fit residual (aynı boyut)
+    """
+    from sklearn.linear_model import RidgeCV
+    from sklearn.model_selection import KFold
+
+    n = len(signal_arr)
+    residual = signal_arr.copy()
+
+    if n < 20 or factor_arr.ndim < 2 or factor_arr.shape[1] == 0:
+        return residual - residual.mean()
+
+    effective_splits = max(2, min(n_splits, n // 10))
+    if effective_splits < 2:
+        return residual - residual.mean()
+
+    kf = KFold(n_splits=effective_splits, shuffle=False)
+    for train_idx, test_idx in kf.split(signal_arr):
+        X_train = factor_arr[train_idx]
+        y_train = signal_arr[train_idx]
+        X_test  = factor_arr[test_idx]
+
+        try:
+            ridge = RidgeCV(alphas=[0.01, 0.1, 1.0, 10.0], fit_intercept=True)
+            ridge.fit(X_train, y_train)
+            residual[test_idx] = signal_arr[test_idx] - ridge.predict(X_test)
+        except Exception:
+            residual[test_idx] = signal_arr[test_idx] - signal_arr[test_idx].mean()
+
+    return residual
+
+
+# ---------------------------------------------------------------------------
 # Core neutralization — İki-Aşamalı
 # ---------------------------------------------------------------------------
 
@@ -165,20 +218,24 @@ def neutralize_signal(
     factors: pd.DataFrame | None = None,
     factor_cols: list[str] | None = None,
     two_stage: bool = True,
+    use_dml: bool = False,
+    dml_n_splits: int = 2,
 ) -> pd.Series:
     """
     Cross-sectional olarak sinyali faktörlerden arındır (İki-Aşamalı).
 
-    Stage 1: Rank-Space OLS — doğrusal rank korelasyonunu kaldır.
+    Stage 1: Rank-Space OLS veya DML cross-fit residualization.
     Stage 2: Quantile Bin-Demean — nonlinear size bias'ı kaldır.
 
     Parameters
     ----------
-    signal      : (Ticker, Date) indexed Series — ham formül sinyali
-    idx         : MultiIndex DataFrame (Pclose ve diğer fiyat sütunları içermeli)
-    factors     : Önceden hesaplanmış faktör matrisi (None → otomatik üretir)
-    factor_cols : Kullanılacak faktörler (None → ["size", "vol", "mom"])
-    two_stage   : True (varsayılan) → Stage 1 + Stage 2; False → sadece Stage 1
+    signal       : (Ticker, Date) indexed Series — ham formül sinyali
+    idx          : MultiIndex DataFrame (Pclose ve diğer fiyat sütunları içermeli)
+    factors      : Önceden hesaplanmış faktör matrisi (None → otomatik üretir)
+    factor_cols  : Kullanılacak faktörler (None → ["size", "vol", "mom"])
+    two_stage    : True (varsayılan) → Stage 1 + Stage 2; False → sadece Stage 1
+    use_dml      : False (varsayılan) → Stage 1 OLS; True → DML cross-fit Ridge
+    dml_n_splits : DML KFold bölüm sayısı (varsayılan: 2 — hız/kalite dengesi)
 
     Returns
     -------
@@ -231,8 +288,8 @@ def neutralize_signal(
             }))
             continue
 
-        # ── Stage 1: Rank-Space OLS ────────────────────────────────────
-        # Spearman IC rank uzayında ölçüldüğü için OLS'yi rank uzayında yap.
+        # ── Stage 1: Rank-Space OLS veya DML ──────────────────────────
+        # Spearman IC rank uzayında ölçüldüğü için rank uzayında çalış.
         # Cross-sectional uniform rank → [-0.5, 0.5]
         y_raw = clean["signal"].values.astype(float)
         y = _rank_norm(y_raw)
@@ -242,17 +299,20 @@ def neutralize_signal(
         for c in available:
             rank_col = f"{c}_rank"
             if rank_col in clean.columns and not clean[rank_col].isna().all():
-                X_cols.append(clean[rank_col].values.astype(float))   # NaN zaten filtrelendi
+                X_cols.append(clean[rank_col].values.astype(float))
             else:
                 X_cols.append(_rank_norm(clean[c].values.astype(float)))
         X = np.column_stack(X_cols)
-        X_aug = np.hstack([np.ones((len(X), 1)), X])
 
-        try:
-            beta, _, _, _ = np.linalg.lstsq(X_aug, y, rcond=None)
-            resid = y - X_aug @ beta
-        except (np.linalg.LinAlgError, ValueError):
-            resid = y - y.mean()
+        if use_dml:
+            resid = _dml_residualize(y, X, n_splits=dml_n_splits)
+        else:
+            X_aug = np.hstack([np.ones((len(X), 1)), X])
+            try:
+                beta, _, _, _ = np.linalg.lstsq(X_aug, y, rcond=None)
+                resid = y - X_aug @ beta
+            except (np.linalg.LinAlgError, ValueError):
+                resid = y - y.mean()
 
         # ── Stage 2: Quantile Bin-Demean ──────────────────────────────
         # Rank-OLS artığının hâlâ taşıdığı nonlinear size bias'ı kaldır.

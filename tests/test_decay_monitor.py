@@ -88,8 +88,10 @@ def test_state_resets_after_recovery():
 # ──────────────────────────────────────────────────────────────────────
 def test_scan_decay_finds_first_breach_date():
     """scan_decay bilinen breach noktasının tarihini doğru bulur."""
+    # extreme_sigma_cap=5.0: 4σ sapma N20 "uç şok" kapsamına girmesin;
+    # 4 > 3.5 (default cap) olduğundan sayaç donardı → test başarısız olurdu.
     cfg = DecayConfig(delta=1e-5, lambda_threshold=0.002, consecutive_days=3,
-                      sigma_floor=1.0)
+                      sigma_floor=1.0, extreme_sigma_cap=5.0)
     backtest_mean = 0.001
     backtest_std  = 0.005
 

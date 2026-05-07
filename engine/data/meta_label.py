@@ -65,6 +65,7 @@ def build_meta_dataset(
     idx: pd.DataFrame,
     factors: Optional[pd.DataFrame] = None,
     regime: Optional[pd.Series] = None,
+    prob_df: Optional[pd.DataFrame] = None,
     rolling_ic_window: int = 20,
     target_col: str = "TB_Label",
 ) -> pd.DataFrame:
@@ -81,6 +82,9 @@ def build_meta_dataset(
         build_factors_cache() çıktısı (size, vol, mom kolonları).
     regime : pd.Series, opsiyonel
         index=Date, değer ∈ {"bull","chop","bear"}.
+    prob_df : pd.DataFrame, opsiyonel
+        HMM olasılık matrisi (Date × regime_K).
+        Shannon entropisi hesaplanır → "regime_entropy" feature.
     rolling_ic_window : int
         recent_ic için kullanılacak rolling pencere (iş günü).
     target_col : str
@@ -91,7 +95,8 @@ def build_meta_dataset(
     pd.DataFrame
         index = (Ticker, Date) MultiIndex
         Kolonlar: sig_rank, size_rank (varsa), vol_rank (varsa),
-                  regime_bull, regime_bear (varsa), recent_ic, label (y).
+                  regime_bull, regime_bear (varsa), regime_entropy (varsa),
+                  recent_ic, label (y).
     """
     # Sinyal rank (cross-sectional, per Date)
     sig_df = signal.rename("signal").reset_index()
@@ -132,6 +137,18 @@ def build_meta_dataset(
                              index=feat.index)
         feat["regime_bull"] = (reg_vals == "bull").astype(float)
         feat["regime_bear"] = (reg_vals == "bear").astype(float)
+
+    # Rejim belirsizliği: HMM olasılık vektörünün Shannon entropisi
+    if prob_df is not None:
+        try:
+            p = prob_df.clip(lower=1e-9)
+            entropy = -(p * np.log(p)).sum(axis=1)
+            dates_idx = pd.to_datetime(feat.index.get_level_values("Date"))
+            feat["regime_entropy"] = [
+                float(entropy.get(pd.Timestamp(d), 0.0) or 0.0) for d in dates_idx
+            ]
+        except Exception:
+            feat["regime_entropy"] = 0.0
 
     # Rolling IC (son rolling_ic_window günün ortalama cross-sectional IC)
     try:
@@ -240,6 +257,53 @@ def train_meta_model(
         auc=auc,
         fit_failed=False,
     )
+
+
+def apply_meta_filter_to_pool(
+    pool: list,
+    meta_model: "MetaModel",
+    threshold: float = 0.55,
+    feature_df: Optional[pd.DataFrame] = None,
+) -> list:
+    """Mining sonrası formül havuzunu meta-model confidence ile filtrele.
+
+    Her pool öğesi için P(kârlı) tahmin edilir; threshold altındakiler çıkarılır.
+    feature_df geçilmezse veya model başarısızsa fallback proba=0.5 kullanılır:
+    bu durumda threshold=1.0 boş liste, threshold=0.0 tüm havuzu döndürür.
+
+    Parametreler
+    ------------
+    pool        : list — MiningResult veya herhangi bir formül sonucu listesi.
+    meta_model  : MetaModel — eğitilmiş meta-label modeli.
+    threshold   : float — bu değerin altındaki elemanlar çıkarılır.
+    feature_df  : pd.DataFrame, opsiyonel
+        Her satırı pool[i]'ye karşılık gelir (MetaModel.feature_cols mevcut olmalı).
+
+    Döner
+    ------
+    list — threshold'u geçen formüllerin alt listesi.
+    """
+    if not pool:
+        return []
+
+    # Per-item proba hesapla (fallback=0.5 eğer model/feature yok)
+    if (
+        feature_df is not None
+        and not meta_model.fit_failed
+        and meta_model.model is not None
+    ):
+        try:
+            proba_series = meta_model.predict_proba(feature_df)
+            proba_values = list(proba_series.values)
+            # Pool ve feature_df boyutu eşleşmiyorsa kısa olanı kullan
+            n = min(len(pool), len(proba_values))
+            probas = proba_values[:n] + [0.5] * (len(pool) - n)
+        except Exception:
+            probas = [0.5] * len(pool)
+    else:
+        probas = [0.5] * len(pool)
+
+    return [item for item, p in zip(pool, probas) if p >= threshold]
 
 
 def apply_meta_filter(

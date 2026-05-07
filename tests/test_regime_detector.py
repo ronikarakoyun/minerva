@@ -83,13 +83,16 @@ def cfg_short() -> RegimeConfig:
 # 1. Feature engineering
 # ──────────────────────────────────────────────────────────────────────
 def test_compute_features_no_nan(synthetic_ohlcv: pd.DataFrame, cfg_short: RegimeConfig):
-    feats = compute_features(synthetic_ohlcv, cfg_short)
+    feats, scaler = compute_features(synthetic_ohlcv, cfg_short)
     assert not feats.isna().any().any(), "Feature DataFrame'inde NaN olmamalı"
     assert list(feats.columns) == FEATURES
     # RobustScaler sonrası medyan ≈ 0
     assert feats.median().abs().max() < 0.5, "Scaled feature medyanı sıfıra yakın olmalı"
     # Boyut: ~ASLanlardaki rolling kayıp kadar daha az
     assert len(feats) >= len(synthetic_ohlcv) - 30
+    # Scaler döndürülmeli
+    from sklearn.preprocessing import RobustScaler
+    assert isinstance(scaler, RobustScaler)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -104,7 +107,7 @@ def test_constrained_hmm_disqualifies_too_small_regimes(
     Geçerli K aralığı bu durumda K=2 olmalı.
     """
     cfg = RegimeConfig(min_K=2, max_K=3, min_samples_per_regime=600, n_iter=200)
-    feats = compute_features(synthetic_ohlcv, cfg)
+    feats, _ = compute_features(synthetic_ohlcv, cfg)
     model, best_K, candidates = fit_constrained_hmm(feats, cfg)
 
     assert best_K == 2, f"K=2 seçilmeli (K=3 disqualified), seçilen={best_K}"
@@ -120,7 +123,7 @@ def test_no_valid_K_raises(synthetic_ohlcv: pd.DataFrame):
         min_samples_per_regime=10_000,  # 1500 günden fazla → hiç geçemez
         n_iter=100,
     )
-    feats = compute_features(synthetic_ohlcv, cfg)
+    feats, _ = compute_features(synthetic_ohlcv, cfg)
     with pytest.raises(RuntimeError, match="min_samples_per_regime"):
         fit_constrained_hmm(feats, cfg)
 
@@ -131,7 +134,7 @@ def test_no_valid_K_raises(synthetic_ohlcv: pd.DataFrame):
 def test_probability_vector_shape_and_sum(
     synthetic_ohlcv: pd.DataFrame, cfg_short: RegimeConfig
 ):
-    feats = compute_features(synthetic_ohlcv, cfg_short)
+    feats, _ = compute_features(synthetic_ohlcv, cfg_short)
     model, best_K, _ = fit_constrained_hmm(feats, cfg_short)
     prob_df = compute_probability_vector(model, feats)
 
@@ -159,7 +162,7 @@ def test_save_load_roundtrip(
         metadata_path=tmp_path / "metadata.json",
         plot_path=tmp_path / "plot.png",
     )
-    feats = compute_features(synthetic_ohlcv, cfg)
+    feats, _ = compute_features(synthetic_ohlcv, cfg)
     model, best_K, candidates = fit_constrained_hmm(feats, cfg)
     prob_df = compute_probability_vector(model, feats)
     raw_returns = np.log(synthetic_ohlcv["Close"] / synthetic_ohlcv["Close"].shift(1)).dropna()
@@ -189,7 +192,7 @@ def test_metadata_keys_and_values(
         metadata_path=tmp_path / "metadata.json",
         plot_path=tmp_path / "plot.png",
     )
-    feats = compute_features(synthetic_ohlcv, cfg)
+    feats, _ = compute_features(synthetic_ohlcv, cfg)
     model, best_K, candidates = fit_constrained_hmm(feats, cfg)
     prob_df = compute_probability_vector(model, feats)
     raw_returns = np.log(synthetic_ohlcv["Close"] / synthetic_ohlcv["Close"].shift(1)).dropna()

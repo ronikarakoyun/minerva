@@ -1,69 +1,42 @@
 """Job registry — uzun süren işlemler için.
 
 Her job için:
-  - status: pending | running | done | error
+  - status: pending | running | done | error | stale
   - progress: 0..1
   - log_lines: deque (son N satır)
   - subscribers: set[asyncio.Queue] — WebSocket dinleyicileri
 
 Aktif job'lar in-memory tutulur (WebSocket subscription için zorunlu).
-Tamamlanan/başarısız job'lar SQLite'a yazılır; restart sonrası sorgulanabilir.
+Tamamlanan/başarısız job'lar PostgreSQL'e yazılır; restart sonrası sorgulanabilir.
+
+Hibrit göç: SQLite kaldırıldı; engine/data/db/MinervaDB üzerinden asyncpg kullanılır.
+MinervaDB.init() uygulama startup'ında (api/main.py lifespan) çağrılmalıdır.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
-import sqlite3
 import time
 import uuid
 from collections import deque
-from contextlib import contextmanager
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Optional
-
-_DB_PATH = Path("data/jobs.db")
-_RETENTION_LIMIT = 500   # SQLite'ta saklanacak max job sayısı
-_MEMORY_LIMIT = 50       # In-memory tutulacak max job sayısı
 
 logger = logging.getLogger(__name__)
 
-
-def _init_db() -> None:
-    """DB'yi oluştur ve WAL modunu etkinleştir."""
-    _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(_DB_PATH, timeout=10) as conn:
-        # WAL: okuyucular yazarı, yazarlar okuyucuyu bloklamaz
-        conn.execute("PRAGMA journal_mode=WAL")
-        # WAL ile NORMAL güvenli ve FULL'dan hızlı
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS jobs (
-                id TEXT PRIMARY KEY,
-                status TEXT NOT NULL,
-                progress REAL NOT NULL DEFAULT 0,
-                result TEXT,
-                error TEXT,
-                created_at REAL NOT NULL,
-                finished_at REAL
-            )
-        """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at)")
-        conn.commit()
+_RETENTION_LIMIT = 500   # Postgres'te saklanacak max job sayısı
+_MEMORY_LIMIT = 50       # In-memory tutulacak max job sayısı
 
 
-@contextmanager
+# ─── MinervaDB lazy import ─────────────────────────────────────────────────────
+# Circular import ve test izolasyonu için import'u geç yap.
 def _db():
-    # timeout=5: kilit beklenirken 5 saniyede SQLITE_BUSY yerine graceful wait
-    conn = sqlite3.connect(_DB_PATH, timeout=5)
-    conn.row_factory = sqlite3.Row
-    try:
-        yield conn
-        conn.commit()
-    finally:
-        conn.close()
+    from engine.data.db.postgres import MinervaDB
+    return MinervaDB
 
+
+# ─── Event / Job ───────────────────────────────────────────────────────────────
 
 @dataclass
 class JobEvent:
@@ -96,13 +69,12 @@ class Job:
         return self.status == "running" and (time.time() - self.last_heartbeat) > 300
 
     async def publish(self, event: JobEvent) -> None:
-        self.touch()  # N31: yayın = heartbeat
+        self.touch()
         dead: list[asyncio.Queue] = []
         for q in list(self.subscribers):
             try:
                 q.put_nowait(event)
             except asyncio.QueueFull:
-                # N29: Taşan kuyruk → o subscriber'ı ölü say, listeden çıkar
                 dead.append(q)
                 logger.warning("Subscriber kuyruk taştı — bağlantı koparıldı")
         for q in dead:
@@ -123,65 +95,56 @@ class Job:
         self.status = "done"
         self.result = result
         await self.publish(JobEvent(type="result", data=result))
-        _persist_job(self)
+        await _persist_job(self)
 
     async def fail(self, error: str) -> None:
         self.status = "error"
         self.error = error
         await self.publish(JobEvent(type="error", data=error))
-        _persist_job(self)
+        await _persist_job(self)
 
     async def cancel(self) -> None:
         self.cancelled = True
         await self.fail("İptal edildi")
 
 
-def _persist_job(job: Job) -> None:
+# ─── Persistence (asyncpg) ────────────────────────────────────────────────────
+
+async def _persist_job(job: Job) -> None:
+    """Job'ı PostgreSQL'e kaydet. MinervaDB başlatılmamışsa sessizce atla."""
+    db = _db()
+    if not db.is_ready():
+        logger.debug("MinervaDB hazır değil — job persist atlanıyor (job_id=%s)", job.id)
+        return
+    result_json = json.dumps(job.result, ensure_ascii=False) if job.result is not None else None
     try:
-        result_json = json.dumps(job.result, ensure_ascii=False) if job.result is not None else None
-        with _db() as conn:
-            conn.execute("""
-                INSERT OR REPLACE INTO jobs (id, status, progress, result, error, created_at, finished_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (job.id, job.status, job.progress, result_json,
-                  job.error, job._created_at, time.time()))
-    except sqlite3.OperationalError as exc:
-        # WAL modu ile nadir ama olası: disk dolu, izin hatası, vb.
-        logger.warning("Job persist başarısız (job_id=%s): %s", job.id, exc)
+        async with db.conn() as c:
+            await c.execute(
+                """
+                INSERT INTO jobs (id, status, progress, result, error, created_at, finished_at)
+                VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7)
+                ON CONFLICT (id) DO UPDATE
+                    SET status      = EXCLUDED.status,
+                        progress    = EXCLUDED.progress,
+                        result      = EXCLUDED.result,
+                        error       = EXCLUDED.error,
+                        finished_at = EXCLUDED.finished_at
+                """,
+                job.id, job.status, job.progress,
+                result_json, job.error, job._created_at, time.time(),
+            )
     except Exception as exc:
-        logger.error("Job persist beklenmedik hata (job_id=%s): %s", job.id, exc)
+        logger.warning("Job persist başarısız (job_id=%s): %s", job.id, exc)
 
 
-class JobRegistry:
-    """Aktif job'lar in-memory; biten job'lar SQLite'ta."""
-
-    def __init__(self) -> None:
-        _init_db()
-        self._jobs: dict[str, Job] = {}
-
-    def create(self) -> Job:
-        jid = uuid.uuid4().hex[:12]
-        job = Job(id=jid)
-        self._jobs[jid] = job
-        try:
-            with _db() as conn:
-                conn.execute(
-                    "INSERT INTO jobs (id, status, progress, created_at) VALUES (?, ?, ?, ?)",
-                    (jid, "pending", 0.0, job._created_at),
-                )
-        except Exception as exc:
-            logger.warning("Job kayıt oluşturulamadı (job_id=%s): %s", jid, exc)
-        # Bellek ve disk temizliği — her 20 job'da bir otomatik çalışır
-        if len(self._jobs) % 20 == 0:
-            self.cleanup_old()
-        return job
-
-    def get(self, jid: str) -> Optional[Job]:
-        if jid in self._jobs:
-            return self._jobs[jid]
-        # Bellek'te yoksa SQLite'tan yükle (tamamlanmış job sorgusu)
-        with _db() as conn:
-            row = conn.execute("SELECT * FROM jobs WHERE id = ?", (jid,)).fetchone()
+async def _load_job_from_pg(jid: str) -> Optional[Job]:
+    """PostgreSQL'den tamamlanmış bir job'ı yükle."""
+    db = _db()
+    if not db.is_ready():
+        return None
+    try:
+        async with db.conn() as c:
+            row = await c.fetchrow("SELECT * FROM jobs WHERE id = $1", jid)
         if row is None:
             return None
         job = Job(
@@ -193,37 +156,81 @@ class JobRegistry:
         )
         job._created_at = row["created_at"]
         return job
+    except Exception as exc:
+        logger.warning("Job PG'den yüklenemedi (job_id=%s): %s", jid, exc)
+        return None
+
+
+async def _cleanup_old_pg(keep: int = _RETENTION_LIMIT) -> None:
+    """Postgres'te _RETENTION_LIMIT'i aşan eski job kayıtlarını temizle."""
+    db = _db()
+    if not db.is_ready():
+        return
+    try:
+        async with db.conn() as c:
+            deleted = await c.fetchval(
+                """
+                WITH oldest AS (
+                    SELECT id FROM jobs
+                    ORDER BY created_at DESC
+                    OFFSET $1
+                )
+                DELETE FROM jobs WHERE id IN (SELECT id FROM oldest)
+                RETURNING 1
+                """,
+                keep,
+            )
+        if deleted:
+            logger.info("Eski PG job kayıtları temizlendi: %s satır silindi.", deleted)
+    except Exception as exc:
+        logger.warning("PG job temizleme başarısız: %s", exc)
+
+
+# ─── JobRegistry ──────────────────────────────────────────────────────────────
+
+class JobRegistry:
+    """Aktif job'lar in-memory; biten job'lar PostgreSQL'de."""
+
+    def __init__(self) -> None:
+        self._jobs: dict[str, Job] = {}
+
+    def create(self) -> Job:
+        jid = uuid.uuid4().hex[:12]
+        job = Job(id=jid)
+        self._jobs[jid] = job
+        # Fire-and-forget: startup'ta PG hazır olmayabilir; persist finish/fail'de olur.
+        if len(self._jobs) % 20 == 0:
+            asyncio.ensure_future(self._cleanup_old())
+        return job
+
+    def get_sync(self, jid: str) -> Optional[Job]:
+        """In-memory arama (sync). Biten job için get() kullan."""
+        return self._jobs.get(jid)
+
+    async def get(self, jid: str) -> Optional[Job]:
+        """In-memory varsa döner; yoksa PG'den yükler."""
+        if jid in self._jobs:
+            return self._jobs[jid]
+        return await _load_job_from_pg(jid)
 
     def all(self) -> list[Job]:
         return list(self._jobs.values())
 
-    def cleanup_old(self, keep: int = _MEMORY_LIMIT) -> None:
-        """Bellekte en son N job'ı tut; SQLite'ta _RETENTION_LIMIT'i aşanları sil."""
-        # N31: Stale running job'ları "stale" statüsüne al
+    async def _cleanup_old(self, keep: int = _MEMORY_LIMIT) -> None:
+        # N31: Stale running job'ları işaretle
         for job in list(self._jobs.values()):
             if job.is_stale:
                 job.status = "stale"
-                _persist_job(job)
+                await _persist_job(job)
                 logger.warning(
                     "Stale job tespit edildi (job_id=%s, last_heartbeat=%.0fs önce)",
                     job.id, time.time() - job.last_heartbeat,
                 )
-
         if len(self._jobs) > keep:
             sorted_ids = list(self._jobs.keys())
             for jid in sorted_ids[:-keep]:
                 self._jobs.pop(jid, None)
-        try:
-            with _db() as conn:
-                deleted = conn.execute(f"""
-                    DELETE FROM jobs WHERE id NOT IN (
-                        SELECT id FROM jobs ORDER BY created_at DESC LIMIT {_RETENTION_LIMIT}
-                    )
-                """).rowcount
-            if deleted:
-                logger.info("Eski job kayıtları temizlendi: %d satır silindi.", deleted)
-        except Exception as exc:
-            logger.warning("Job temizleme başarısız: %s", exc)
+        await _cleanup_old_pg()
 
 
 # Modül-seviyesi singleton

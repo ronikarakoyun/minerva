@@ -8,15 +8,23 @@ Incremental mod:
   - Sonunda market_db.parquet'i long-format olarak günceller (Minerva uyumlu)
 """
 
-import yfinance as yf
-import pandas as pd
-from datetime import datetime, timedelta
+import argparse
 import os
+from datetime import datetime, timedelta
+
+import pandas as pd
+import yfinance as yf
 
 # ─── Ayarlar ──────────────────────────────────────────────────────────────────
 
 END_DATE   = datetime.today().strftime("%Y-%m-%d")
-START_DATE = (datetime.today() - timedelta(days=10 * 365)).strftime("%Y-%m-%d")
+# Default: bugünden 10 yıl geriye. CLI / env üzerinden override edilebilir:
+#   python scripts/fetch_bist_data.py --start 2012-01-01
+#   FETCH_START=2012-01-01 python scripts/fetch_bist_data.py
+START_DATE = os.environ.get(
+    "FETCH_START",
+    (datetime.today() - timedelta(days=10 * 365)).strftime("%Y-%m-%d"),
+)
 
 OUTPUT_DIR = "data"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -845,6 +853,20 @@ def load_existing() -> pd.DataFrame:
 
 
 def main():
+    global START_DATE, END_DATE
+
+    parser = argparse.ArgumentParser(description="BIST OHLCV data fetcher (incremental)")
+    parser.add_argument("--start", type=str, default=None,
+                        help="Başlangıç tarihi YYYY-MM-DD (varsayılan: env FETCH_START veya bugünden 10 yıl geriye)")
+    parser.add_argument("--end",   type=str, default=None,
+                        help="Bitiş tarihi YYYY-MM-DD (varsayılan: bugün)")
+    args, _ = parser.parse_known_args()
+    if args.start:
+        START_DATE = args.start
+    if args.end:
+        END_DATE = args.end
+    print(f"📅 Fetch penceresi: {START_DATE} → {END_DATE}")
+
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     # ── Mevcut veriyi yükle ───────────────────────────────────────────────────

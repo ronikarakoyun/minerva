@@ -36,6 +36,8 @@ class GrammarMCTS:
         value_fn: Optional[Callable[[Node], float]] = None,
         policy_fn: Optional[Callable[[Node, List[str]], List[float]]] = None,
         subtree_prior: Optional[dict] = None,
+        uncertainty_fn: Optional[Callable[[Node], float]] = None,
+        c_uncertainty: float = 0.1,
     ):
         """
         Parameters
@@ -46,6 +48,9 @@ class GrammarMCTS:
                         alt-ağaçlarının sıklığı → PUCT bonus olarak eklenir.
                         Warm-start prior (6.3) için kullanılır.
                         app.py'de: {str(t): 0.1 for t in session_state.trees.values()}
+        uncertainty_fn : Node → float — MC Dropout epistemic std tahmini.
+                         Yüksek belirsizlik → exploration bonus (c_uncertainty * sigma).
+        c_uncertainty  : Epistemic bonus ölçeği (varsayılan: 0.1).
         """
         self.cfg = cfg
         self.max_K = max_K
@@ -53,6 +58,8 @@ class GrammarMCTS:
         self.rollouts = rollouts
         self.value_fn = value_fn
         self.policy_fn = policy_fn
+        self.uncertainty_fn = uncertainty_fn
+        self.c_uncertainty = c_uncertainty
         # Subtree prior: bilinen iyi alt-ağaçlara bonus — sıfırdan öğrenmeyi azaltır
         self.subtree_prior: dict = subtree_prior or {}
 
@@ -158,7 +165,11 @@ class GrammarMCTS:
         """
         if self.value_fn is not None:
             # AlphaZero: terminal olmayan node'da da value_fn kullan (rollout yok)
-            return float(self.value_fn(leaf.state))
+            val = float(self.value_fn(leaf.state))
+            if self.uncertainty_fn is not None:
+                sigma = float(self.uncertainty_fn(leaf.state))
+                val += self.c_uncertainty * sigma  # yüksek belirsizlik → exploration bonus
+            return val
         # Fallback: naive structural heuristic (operatör çeşitliliği)
         vals = []
         for _ in range(max(1, self.rollouts // 4)):

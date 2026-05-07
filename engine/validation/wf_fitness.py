@@ -166,6 +166,7 @@ def compute_wf_fitness(
     lambda_size: float = 0.5,        # Size-corr penaltı ağırlığı
     size_corr_hard_limit: float = 0.5,  # N16: 0.7→0.5 — daha sıkı size filtresi
     regime: "pd.Series | None" = None,  # Date→{"bull","chop","bear"} rejim serisi
+    use_dml: bool = False,           # PR-8: OLS yerine DML (Neyman-ortogonal) nötralizasyon
 ) -> dict:
     """
     Tek formül için WF-fitness hesapla.
@@ -230,7 +231,7 @@ def compute_wf_fitness(
     # --- Faktör Nötralizasyonu ---
     if neutralize:
         try:
-            sig = neutralize_signal(sig, idx, factors=factor_cache)
+            sig = neutralize_signal(sig, idx, factors=factor_cache, use_dml=use_dml)
         except Exception:
             pass  # nötralizasyon başarısızsa ham sinyale devam et
 

@@ -55,6 +55,7 @@ def run_pro_backtest(
     benchmark: "pd.Series | None" = None,
     risk_cfg=None,
     slippage_cfg=None,
+    portfolio_mode: str = "equal_weight",
 ):
     """
     Vektörize TopK-Dropout portföy backtester.
@@ -76,6 +77,10 @@ def run_pro_backtest(
                     None / use_dynamic_slippage=False → sabit buy_fee/sell_fee.
                     use_dynamic_slippage=True → portföydeki her hissede
                     Almgren-Chriss bps cezası eklenir.
+    portfolio_mode : "equal_weight" (varsayılan) | "risk_parity" | "black_litterman"
+                    equal_weight → mevcut 1/N davranışı (değişmez).
+                    risk_parity  → ERC ağırlıkları (portfolio_allocator.py).
+                    black_litterman → BL ağırlıkları (sinyal ortalama view olarak).
 
     Returns
     -------
@@ -160,6 +165,31 @@ def run_pro_backtest(
     ranked_all   = np.argsort(sig_filled, axis=1)[:, ::-1]          # (D, T) azalan sıra
     valid_all    = ~np.isnan(sig_arr)                                # (D, T) bool
 
+    # Portföy ağırlıkları — portfolio_mode'a göre (equal_weight → None, hızlı yol)
+    _port_weights: "np.ndarray | None" = None
+    if portfolio_mode != "equal_weight":
+        try:
+            from engine.risk.portfolio_allocator import (
+                black_litterman as _bl,
+                equal_risk_contribution as _erc,
+            )
+            _ret_wide = ret_piv.copy()
+            tickers   = list(sig_piv.columns)
+            if portfolio_mode == "risk_parity":
+                _w = _erc(_ret_wide, lookback=min(60, n_dates))
+            else:  # black_litterman
+                # View: ortalama sinyal değerini per-ticker expected return olarak kullan
+                sig_mean = sig_piv.mean(axis=0)
+                sig_mean = sig_mean / (sig_mean.abs().max() or 1.0) * 0.005
+                views = {t: float(sig_mean.get(t, 0.0)) for t in tickers}
+                _w = _bl(_ret_wide, views=views, lookback=min(60, n_dates))
+            _w = _w.reindex(tickers).fillna(1.0 / len(tickers))
+            _port_weights = _w.to_numpy(dtype=float)
+        except Exception as exc:
+            import warnings as _w_mod
+            _w_mod.warn(f"portfolio_mode={portfolio_mode!r} başarısız ({exc}) — equal_weight fallback.")
+            _port_weights = None
+
     # ------------------------------------------------------------------
     # Ana döngü — her gün numpy array ops (Python set YOK)
     # ------------------------------------------------------------------
@@ -202,13 +232,20 @@ def run_pro_backtest(
             drop_n = len(worst_in_port)
 
         # Günlük portföy getirisi
-        # NaN pozisyonlar (genellikle son 2 gün — shift(-2) yokluğu) 0 getiri
-        # olarak sayılır: portfolyoda tutuyoruz ama exit fiyatı yok.
-        # Sadece valid_rets.mean() almak NaN'ları dışarıda bırakır ve
-        # son günlerde yukarı bias oluşturur.
         port_rets = ret_arr[di, portfolio]
         port_size = int(portfolio.sum())
-        rets      = float(np.nansum(port_rets)) / max(port_size, 1)
+        if _port_weights is not None and port_size > 0:
+            # Risk parity / Black-Litterman ağırlıklı getiri
+            w_port = _port_weights[portfolio]
+            w_sum  = w_port.sum()
+            if w_sum > 1e-9:
+                w_port = w_port / w_sum
+                rets = float(np.nansum(np.where(np.isnan(port_rets), 0.0, port_rets) * w_port))
+            else:
+                rets = float(np.nansum(port_rets)) / max(port_size, 1)
+        else:
+            # equal_weight (varsayılan) — mevcut 1/N davranışı
+            rets = float(np.nansum(port_rets)) / max(port_size, 1)
 
         size      = int(portfolio.sum())
         buy_cost  = (add_n  / max(size, 1)) * buy_fee
@@ -266,7 +303,6 @@ def run_pro_backtest(
             # Hizalama uyarısı: benchmark strateji tarihlerinin %10'undan fazlasını
             # kapsayamıyorsa (ffill ile doldurulamayan boşluklar) uyar.
             if len(bm) < int(n_dates * BM_COVERAGE_WARN_PCT):
-                import warnings
                 warnings.warn(
                     f"Benchmark {n_dates - len(bm)} tarihte eksik "
                     f"({len(bm)}/{n_dates} gün eşleşti); "

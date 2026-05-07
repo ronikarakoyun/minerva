@@ -36,9 +36,37 @@ try:
 except ImportError:
     pass
 
+from contextlib import asynccontextmanager
+
 from api.routes import backtest, catalog, formulas, jobs as jobs_routes, mining, system, training
 
+
+@asynccontextmanager
+async def lifespan(app):
+    # Startup: PostgreSQL pool'u başlat (MINERVA_PG_DSN yoksa sessizce atla)
+    import os
+    pg_dsn = os.getenv("MINERVA_PG_DSN")
+    if pg_dsn:
+        try:
+            from engine.data.db.postgres import MinervaDB
+            await MinervaDB.init(dsn=pg_dsn)
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning(
+                "PostgreSQL pool başlatılamadı (%s) — jobs SQLite'siz in-memory modda.", exc
+            )
+    yield
+    # Shutdown
+    try:
+        from engine.data.db.postgres import MinervaDB
+        if MinervaDB.is_ready():
+            await MinervaDB.close()
+    except Exception:
+        pass
+
+
 app = FastAPI(
+    lifespan=lifespan,
     title="Minerva v3 API",
     version="0.1.0",
     description="Variant C SPA backend — engine/* sarmalayıcısı.",
