@@ -587,7 +587,7 @@ def run_walk_forward(
     # Geriye dönük uyumluluk için varsayılan False olan tüm opt-in flagler
     # 10 yıllık maraton için burada aktive edilir.
     mining_cfg = MiningConfig(
-        num_gen=200,
+        num_gen=30,   # 200 → 30: her trial 200×50=10K iterasyon yerine 30×50=1500 iterasyon
         search_mode="mcts",            # MCTS arama motoru (Faz 3)
         use_wf_fitness=True,           # Walk-forward fold fitness
         neutralize=True,               # Faktör nötralizasyonu
