@@ -1,0 +1,121 @@
+[
+  {
+    "formula": "Sub(0.1, Mad(CSRank(CSRank(Log(Popen))), 30))",
+    "ast": {
+      "k": "binary_asym",
+      "o": "Sub",
+      "c": [
+        {
+          "k": "constant",
+          "o": 0.1,
+          "c": []
+        },
+        {
+          "k": "rolling",
+          "o": "Mad",
+          "c": [
+            {
+              "k": "cs_op",
+              "o": "CSRank",
+              "c": [
+                {
+                  "k": "cs_op",
+                  "o": "CSRank",
+                  "c": [
+                    {
+                      "k": "unary",
+                      "o": "Log",
+                      "c": [
+                        {
+                          "k": "feature",
+                          "o": "Popen",
+                          "c": []
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "k": "num",
+              "o": 30,
+              "c": []
+            }
+          ]
+        }
+      ]
+    },
+    "ast_schema": 1,
+    "ic": 0.026437,
+    "rank_ic": 0.026437,
+    "adj_ic": 0.026437,
+    "source": "llm",
+    "discovered_at": "2026-05-07T03:53:11.798847",
+    "updated_at": "2026-05-07T03:53:11.799999",
+    "_schema": 5,
+    "regime_champion_for": 0
+  },
+  {
+    "formula": "WMA(Add(Abs(CSRank(Rank(Popen, 20))), -0.01), 20)",
+    "ast": {
+      "k": "rolling",
+      "o": "WMA",
+      "c": [
+        {
+          "k": "binary",
+          "o": "Add",
+          "c": [
+            {
+              "k": "unary",
+              "o": "Abs",
+              "c": [
+                {
+                  "k": "cs_op",
+                  "o": "CSRank",
+                  "c": [
+                    {
+                      "k": "rolling",
+                      "o": "Rank",
+                      "c": [
+                        {
+                          "k": "feature",
+                          "o": "Popen",
+                          "c": []
+                        },
+                        {
+                          "k": "num",
+                          "o": 20,
+                          "c": []
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "k": "constant",
+              "o": -0.01,
+              "c": []
+            }
+          ]
+        },
+        {
+          "k": "num",
+          "o": 20,
+          "c": []
+        }
+      ]
+    },
+    "ast_schema": 1,
+    "ic": 0.025556,
+    "rank_ic": 0.025556,
+    "adj_ic": 0.025556,
+    "source": "llm",
+    "discovered_at": "2026-05-07T03:53:11.801797",
+    "updated_at": "2026-05-07T03:53:11.802456",
+    "_schema": 5,
+    "regime_champion_for": 1
+  }
+]

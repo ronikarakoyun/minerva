@@ -1,0 +1,135 @@
+[
+  {
+    "formula": "Add(CSRank(Min(Sub(0.05, Add(Corr(Phigh, Mul(Vlot, 0.1), 30), 0.05)), 20)), 0.05)",
+    "ast": {
+      "k": "binary",
+      "o": "Add",
+      "c": [
+        {
+          "k": "cs_op",
+          "o": "CSRank",
+          "c": [
+            {
+              "k": "rolling",
+              "o": "Min",
+              "c": [
+                {
+                  "k": "binary_asym",
+                  "o": "Sub",
+                  "c": [
+                    {
+                      "k": "constant",
+                      "o": 0.05,
+                      "c": []
+                    },
+                    {
+                      "k": "binary",
+                      "o": "Add",
+                      "c": [
+                        {
+                          "k": "paired_rolling",
+                          "o": "Corr",
+                          "c": [
+                            {
+                              "k": "feature",
+                              "o": "Phigh",
+                              "c": []
+                            },
+                            {
+                              "k": "binary",
+                              "o": "Mul",
+                              "c": [
+                                {
+                                  "k": "feature",
+                                  "o": "Vlot",
+                                  "c": []
+                                },
+                                {
+                                  "k": "constant",
+                                  "o": 0.1,
+                                  "c": []
+                                }
+                              ]
+                            },
+                            {
+                              "k": "num",
+                              "o": 30,
+                              "c": []
+                            }
+                          ]
+                        },
+                        {
+                          "k": "constant",
+                          "o": 0.05,
+                          "c": []
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "k": "num",
+                  "o": 20,
+                  "c": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "k": "constant",
+          "o": 0.05,
+          "c": []
+        }
+      ]
+    },
+    "ast_schema": 1,
+    "ic": 0.026499,
+    "rank_ic": 0.026499,
+    "adj_ic": 0.026499,
+    "source": "llm",
+    "discovered_at": "2026-05-06T23:36:11.714780",
+    "updated_at": "2026-05-06T23:36:11.716940",
+    "_schema": 5,
+    "regime_champion_for": 0
+  },
+  {
+    "formula": "WMA(Rank(Pclose, 40), 20)",
+    "ast": {
+      "k": "rolling",
+      "o": "WMA",
+      "c": [
+        {
+          "k": "rolling",
+          "o": "Rank",
+          "c": [
+            {
+              "k": "feature",
+              "o": "Pclose",
+              "c": []
+            },
+            {
+              "k": "num",
+              "o": 40,
+              "c": []
+            }
+          ]
+        },
+        {
+          "k": "num",
+          "o": 20,
+          "c": []
+        }
+      ]
+    },
+    "ast_schema": 1,
+    "ic": 0.023898,
+    "rank_ic": 0.023898,
+    "adj_ic": 0.023898,
+    "source": "llm",
+    "discovered_at": "2026-05-06T23:36:11.718864",
+    "updated_at": "2026-05-06T23:36:11.719676",
+    "_schema": 5,
+    "regime_champion_for": 1
+  }
+]

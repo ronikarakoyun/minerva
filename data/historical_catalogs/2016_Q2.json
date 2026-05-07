@@ -1,0 +1,336 @@
+[
+  {
+    "formula": "CSRank(Greater(Add(Pow(0.01, Abs(Abs(CSRank(Popen)))), 0.01), Corr(Phigh, Mul(Mul(Pow(0.05, Div(-0.1, Phigh)), 0.05), -0.01), 20)))",
+    "ast": {
+      "k": "cs_op",
+      "o": "CSRank",
+      "c": [
+        {
+          "k": "binary",
+          "o": "Greater",
+          "c": [
+            {
+              "k": "binary",
+              "o": "Add",
+              "c": [
+                {
+                  "k": "binary_asym",
+                  "o": "Pow",
+                  "c": [
+                    {
+                      "k": "constant",
+                      "o": 0.01,
+                      "c": []
+                    },
+                    {
+                      "k": "unary",
+                      "o": "Abs",
+                      "c": [
+                        {
+                          "k": "unary",
+                          "o": "Abs",
+                          "c": [
+                            {
+                              "k": "cs_op",
+                              "o": "CSRank",
+                              "c": [
+                                {
+                                  "k": "feature",
+                                  "o": "Popen",
+                                  "c": []
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "k": "constant",
+                  "o": 0.01,
+                  "c": []
+                }
+              ]
+            },
+            {
+              "k": "paired_rolling",
+              "o": "Corr",
+              "c": [
+                {
+                  "k": "feature",
+                  "o": "Phigh",
+                  "c": []
+                },
+                {
+                  "k": "binary",
+                  "o": "Mul",
+                  "c": [
+                    {
+                      "k": "binary",
+                      "o": "Mul",
+                      "c": [
+                        {
+                          "k": "binary_asym",
+                          "o": "Pow",
+                          "c": [
+                            {
+                              "k": "constant",
+                              "o": 0.05,
+                              "c": []
+                            },
+                            {
+                              "k": "binary_asym",
+                              "o": "Div",
+                              "c": [
+                                {
+                                  "k": "constant",
+                                  "o": -0.1,
+                                  "c": []
+                                },
+                                {
+                                  "k": "feature",
+                                  "o": "Phigh",
+                                  "c": []
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "k": "constant",
+                          "o": 0.05,
+                          "c": []
+                        }
+                      ]
+                    },
+                    {
+                      "k": "constant",
+                      "o": -0.01,
+                      "c": []
+                    }
+                  ]
+                },
+                {
+                  "k": "num",
+                  "o": 20,
+                  "c": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "ast_schema": 1,
+    "ic": 0.021862,
+    "rank_ic": 0.021862,
+    "adj_ic": 0.021862,
+    "source": "llm",
+    "discovered_at": "2026-05-07T10:45:17.705305",
+    "updated_at": "2026-05-07T10:45:17.706624",
+    "_schema": 5,
+    "regime_champion_for": 0
+  },
+  {
+    "formula": "CSRank(Corr(Vlot, Div(-0.01, Div(0.1, Mul(Plow, 0.01))), 20))",
+    "ast": {
+      "k": "cs_op",
+      "o": "CSRank",
+      "c": [
+        {
+          "k": "paired_rolling",
+          "o": "Corr",
+          "c": [
+            {
+              "k": "feature",
+              "o": "Vlot",
+              "c": []
+            },
+            {
+              "k": "binary_asym",
+              "o": "Div",
+              "c": [
+                {
+                  "k": "constant",
+                  "o": -0.01,
+                  "c": []
+                },
+                {
+                  "k": "binary_asym",
+                  "o": "Div",
+                  "c": [
+                    {
+                      "k": "constant",
+                      "o": 0.1,
+                      "c": []
+                    },
+                    {
+                      "k": "binary",
+                      "o": "Mul",
+                      "c": [
+                        {
+                          "k": "feature",
+                          "o": "Plow",
+                          "c": []
+                        },
+                        {
+                          "k": "constant",
+                          "o": 0.01,
+                          "c": []
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "k": "num",
+              "o": 20,
+              "c": []
+            }
+          ]
+        }
+      ]
+    },
+    "ast_schema": 1,
+    "ic": 0.01552,
+    "rank_ic": 0.01552,
+    "adj_ic": 0.01552,
+    "source": "llm",
+    "discovered_at": "2026-05-07T10:45:17.708067",
+    "updated_at": "2026-05-07T10:45:17.708861",
+    "_schema": 5,
+    "regime_champion_for": 1
+  },
+  {
+    "formula": "WMA(CSRank(Add(Corr(CSRank(Abs(Mul(Vlot, -0.1))), Pow(0.01, Less(Add(Plow, 0.01), Pow(-0.05, Popen))), 30), 0.1)), 20)",
+    "ast": {
+      "k": "rolling",
+      "o": "WMA",
+      "c": [
+        {
+          "k": "cs_op",
+          "o": "CSRank",
+          "c": [
+            {
+              "k": "binary",
+              "o": "Add",
+              "c": [
+                {
+                  "k": "paired_rolling",
+                  "o": "Corr",
+                  "c": [
+                    {
+                      "k": "cs_op",
+                      "o": "CSRank",
+                      "c": [
+                        {
+                          "k": "unary",
+                          "o": "Abs",
+                          "c": [
+                            {
+                              "k": "binary",
+                              "o": "Mul",
+                              "c": [
+                                {
+                                  "k": "feature",
+                                  "o": "Vlot",
+                                  "c": []
+                                },
+                                {
+                                  "k": "constant",
+                                  "o": -0.1,
+                                  "c": []
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "k": "binary_asym",
+                      "o": "Pow",
+                      "c": [
+                        {
+                          "k": "constant",
+                          "o": 0.01,
+                          "c": []
+                        },
+                        {
+                          "k": "binary",
+                          "o": "Less",
+                          "c": [
+                            {
+                              "k": "binary",
+                              "o": "Add",
+                              "c": [
+                                {
+                                  "k": "feature",
+                                  "o": "Plow",
+                                  "c": []
+                                },
+                                {
+                                  "k": "constant",
+                                  "o": 0.01,
+                                  "c": []
+                                }
+                              ]
+                            },
+                            {
+                              "k": "binary_asym",
+                              "o": "Pow",
+                              "c": [
+                                {
+                                  "k": "constant",
+                                  "o": -0.05,
+                                  "c": []
+                                },
+                                {
+                                  "k": "feature",
+                                  "o": "Popen",
+                                  "c": []
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "k": "num",
+                      "o": 30,
+                      "c": []
+                    }
+                  ]
+                },
+                {
+                  "k": "constant",
+                  "o": 0.1,
+                  "c": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "k": "num",
+          "o": 20,
+          "c": []
+        }
+      ]
+    },
+    "ast_schema": 1,
+    "ic": 0.01549,
+    "rank_ic": 0.01549,
+    "adj_ic": 0.01549,
+    "source": "llm",
+    "discovered_at": "2026-05-07T10:45:17.709757",
+    "updated_at": "2026-05-07T10:45:17.710952",
+    "_schema": 5,
+    "regime_champion_for": 2
+  }
+]
