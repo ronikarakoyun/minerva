@@ -60,6 +60,9 @@ def is_kill_switch_active() -> bool:
     N25: activated_at alanındaki zaman damgası TTL saatinden eski ise dosyayı
     siler ve False döner (otomatik TTL süresi dolması).
     """
+    # DISABLE_KILL_SWITCH=1 → her zaman pasif (tarihsel simülasyon modu)
+    if os.getenv("DISABLE_KILL_SWITCH", "0") == "1":
+        return False
     if not _KILL_SWITCH_PATH.exists():
         return False
     try:
@@ -138,6 +141,9 @@ def check_daily_loss_limit(cfg: Optional[PaperTraderConfig] = None) -> bool:
     if daily_pnl < limit:
         reason = f"Günlük kayıp eşiği aşıldı: {daily_pnl:.3%} < {limit:.1%}"
         activate_kill_switch(reason)
+        # DISABLE_KILL_SWITCH=1 → trade akışını DURDURMA, sadece logla
+        if os.getenv("DISABLE_KILL_SWITCH", "0") == "1":
+            return True
         return False
     return True
 
@@ -183,6 +189,9 @@ def check_cumulative_drawdown(cfg: Optional[PaperTraderConfig] = None) -> bool:
         reason = f"Kümülatif drawdown eşiği aşıldı: {max_dd:.2%} < {limit:.0%}"
         activate_kill_switch(reason)
         _log.critical("DRAWDOWN LIMIT: %s", reason)
+        # DISABLE_KILL_SWITCH=1 → trade akışını DURDURMA, sadece logla
+        if os.getenv("DISABLE_KILL_SWITCH", "0") == "1":
+            return True
         return False
     return True
 
