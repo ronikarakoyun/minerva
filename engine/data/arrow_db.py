@@ -107,15 +107,27 @@ class MarketDB:
         Returns Arrow Table; .to_pandas() ile DataFrame'e çevirilebilir.
         """
         import pandas as pd
+        import pyarrow as pa
         import pyarrow.compute as pc
 
         start_ts = pd.Timestamp(start)
         end_ts   = pd.Timestamp(end)
 
         date_col = self._table["Date"]
+        # Arrow tablosundaki gerçek timestamp tipini kullan (s, ms, us, ns)
+        date_type = date_col.type
+        try:
+            start_scalar = pa.scalar(start_ts, type=date_type)
+            end_scalar   = pa.scalar(end_ts,   type=date_type)
+        except Exception:
+            # Tip eşleşmiyorsa cast et
+            date_col = pc.cast(date_col, pa.timestamp("ns"))
+            start_scalar = pa.scalar(start_ts.to_datetime64(), type=pa.timestamp("ns"))
+            end_scalar   = pa.scalar(end_ts.to_datetime64(),   type=pa.timestamp("ns"))
+
         mask = pc.and_(
-            pc.greater_equal(date_col, pa_scalar(start_ts)),
-            pc.less_equal(date_col, pa_scalar(end_ts)),
+            pc.greater_equal(date_col, start_scalar),
+            pc.less_equal(date_col, end_scalar),
         )
         return self._table.filter(mask)
 
