@@ -131,6 +131,7 @@ def _worker_run_trial(
     mining_cfg = pickle.loads(mining_cfg_bytes)
     mining_cfg.seed = trial_seed
 
+    db_window = None
     if arrow_path:
         try:
             from engine.data.arrow_db import MarketDB
@@ -140,10 +141,16 @@ def _worker_run_trial(
             else:
                 db_window = db.to_pandas(cache=False)
         except Exception as exc:
-            # Arrow başarısız → pickle fallback
-            db_window = pickle.loads(db_bytes)
-    else:
-        db_window  = pickle.loads(db_bytes)
+            import sys
+            print(f"[worker {trial_seed}] Arrow yolu başarısız ({exc!r}) — pickle fallback",
+                  file=sys.stderr, flush=True)
+            db_window = None
+    if db_window is None:
+        if not db_bytes:
+            raise RuntimeError(
+                f"Worker trial seed={trial_seed}: hem arrow hem pickle yolu boş"
+            )
+        db_window = pickle.loads(db_bytes)
 
     from engine.strategies.mining_runner import run_mining_window
     return run_mining_window(db_window, alpha_cfg, mining_cfg)
@@ -207,7 +214,9 @@ def run_parallel_mining(
         logger.debug("Arrow yolu başarısız (%s) — pickle fallback", exc)
         arrow_path = None
 
-    db_bytes       = pickle.dumps(db) if arrow_path is None else b""
+    # NOT: Arrow yolu çalışsa bile pickle bytes'i gönder — worker'da
+    # Arrow başarısız olursa fallback işlesin (boş bytes ile pickle.loads patlar).
+    db_bytes       = pickle.dumps(db)
     alpha_bytes    = pickle.dumps(alpha_cfg)
     mining_bytes   = pickle.dumps(mining_cfg)
 
