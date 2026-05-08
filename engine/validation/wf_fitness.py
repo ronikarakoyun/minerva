@@ -254,10 +254,23 @@ def compute_wf_fitness(
             return 0.0
         return g["Signal"].corr(g["Target"], method=method)
 
+    # Faz 1.2: DuckDB-vektörize IC hesabı (10-30× hızlanma)
+    try:
+        from engine.validation.wf_fitness_duckdb import (
+            compute_per_date_rank_ic, compute_fold_rank_ic
+        )
+        _USE_DUCKDB = True
+    except ImportError:
+        _USE_DUCKDB = False
+
     # Tüm train IC (geri uyumluluk için)
     try:
-        result["ic"]      = float(tmp.groupby("Date").apply(lambda g: _ic_on_group(g, "pearson")).mean())
-        result["rank_ic"] = float(tmp.groupby("Date").apply(lambda g: _ic_on_group(g, "spearman")).mean())
+        if _USE_DUCKDB:
+            result["ic"]      = compute_per_date_rank_ic(tmp, method="pearson")
+            result["rank_ic"] = compute_per_date_rank_ic(tmp, method="spearman")
+        else:
+            result["ic"]      = float(tmp.groupby("Date").apply(lambda g: _ic_on_group(g, "pearson")).mean())
+            result["rank_ic"] = float(tmp.groupby("Date").apply(lambda g: _ic_on_group(g, "spearman")).mean())
     except Exception:
         pass
 
@@ -270,6 +283,14 @@ def compute_wf_fitness(
             fold_dates = fold_item.get("test", np.array([]))
         else:
             fold_dates = fold_item
+        if _USE_DUCKDB:
+            try:
+                fric = compute_fold_rank_ic(tmp, fold_dates, method="spearman")
+                if not np.isnan(fric):
+                    fold_rics.append(float(fric))
+                continue
+            except Exception:
+                pass  # DuckDB hatası → pandas fallback
         mask = tmp["Date"].isin(fold_dates)
         sub = tmp[mask]
         if len(sub) < 20:        # küçük fold'u atla

@@ -17,6 +17,9 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, List
 
+# Faz 1.4: Numba JIT kernel'leri (varsa hızlı, yoksa pandas fallback)
+from engine.core import alpha_cfg_kernels as _kr
+
 # ---------- Evaluate result cache (N1) ----------
 _EVAL_CACHE: dict[str, Any] = {}
 _EVAL_CACHE_MAXSIZE = 500
@@ -101,14 +104,13 @@ class AlphaCFG:
         "Sub": lambda x, y: x - y,
     }
     # Rolling (time-series): Tablo 6'nın tamamı
+    # Faz 1.4: Yavaş custom-apply operatörleri Numba kernel'lerine taşındı
+    # (Rank, WMA, EMA, Mad, Corr, Cov). Pandas-rolling olanlar zaten C-vektorize.
     ROLLING_OPS = {
-        "Rank":  lambda x, w: _grp(x).apply(
-            lambda g: g.rolling(int(w)).apply(lambda a: pd.Series(a).rank(pct=True).iloc[-1], raw=False)),
-        "WMA":   lambda x, w: _grp(x).apply(
-            lambda g: g.rolling(int(w)).apply(lambda a: np.average(a, weights=np.arange(1, len(a)+1)), raw=True)),
+        "Rank":  lambda x, w: _kr.rolling_rank_pct_groupby(x, int(w)),
+        "WMA":   lambda x, w: _kr.wma_groupby(x, int(w)),
         # N3: adjust=True + min_periods=window → warm-up bias önlenir
-        "EMA":   lambda x, w: _grp(x).apply(
-            lambda g: g.ewm(span=int(w), adjust=True, min_periods=int(w)).mean()),
+        "EMA":   lambda x, w: _kr.ema_groupby(x, int(w)),
         "Ref":   lambda x, w: _grp(x).shift(int(w)),
         "Mean":  lambda x, w: _grp(x).rolling(int(w)).mean().reset_index(0, drop=True),
         "Sum":   lambda x, w: _grp(x).rolling(int(w)).sum().reset_index(0, drop=True),
@@ -119,14 +121,13 @@ class AlphaCFG:
         "Max":   lambda x, w: _grp(x).rolling(int(w)).max().reset_index(0, drop=True),
         "Min":   lambda x, w: _grp(x).rolling(int(w)).min().reset_index(0, drop=True),
         "Med":   lambda x, w: _grp(x).rolling(int(w)).median().reset_index(0, drop=True),
-        "Mad":   lambda x, w: _grp(x).rolling(int(w)).apply(
-            lambda a: np.mean(np.abs(a - np.mean(a))), raw=True),
+        "Mad":   lambda x, w: _kr.rolling_mad_groupby(x, int(w)),
         "Delta": lambda x, w: x - _grp(x).shift(int(w)),
     }
     # Paired Rolling
     PAIRED_OPS = {
-        "Corr": lambda x, y, w: _paired_rolling(x, y, int(w), "corr"),
-        "Cov":  lambda x, y, w: _paired_rolling(x, y, int(w), "cov"),
+        "Corr": lambda x, y, w: _kr.rolling_corr_groupby(x, y, int(w)),
+        "Cov":  lambda x, y, w: _kr.rolling_cov_groupby(x, y, int(w)),
     }
     # Cross-Section (pencere almaz)
     CS_OPS = {

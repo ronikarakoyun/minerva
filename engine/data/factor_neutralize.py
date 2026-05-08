@@ -251,6 +251,22 @@ def neutralize_signal(
     if not available:
         return signal
 
+    # Faz 1.3: Polars yolu varsa kullan (15× hızlı)
+    # MINERVA_USE_POLARS=0 ile devre dışı bırakılabilir
+    import os as _os
+    if _os.getenv("MINERVA_USE_POLARS", "1") == "1":
+        try:
+            from engine.data.factor_neutralize_polars import (
+                neutralize_signal_polars, _check_polars
+            )
+            if _check_polars():
+                return neutralize_signal_polars(
+                    signal, idx, factors=factors, factor_cols=factor_cols,
+                    two_stage=two_stage, use_dml=use_dml, dml_n_splits=dml_n_splits,
+                )
+        except Exception:
+            pass  # ImportError veya runtime hata → pandas yoluna düş
+
     # Pre-computed rank kolonları varsa kullan (8.3 optimizasyon)
     rank_cols = [f"{c}_rank" for c in available if f"{c}_rank" in factors.columns]
     cols_to_join = available + rank_cols

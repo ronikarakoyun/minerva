@@ -117,13 +117,33 @@ def _worker_run_trial(
     db_bytes: bytes,
     alpha_cfg_bytes: bytes,
     mining_cfg_bytes: bytes,
+    arrow_path: "str | None" = None,
+    arrow_start: "str | None" = None,
+    arrow_end:   "str | None" = None,
 ) -> list:
-    """Worker'da tek bir MCTS mining trial çalıştır (pickle tabanlı)."""
+    """Worker'da tek bir MCTS mining trial çalıştır.
+
+    Faz 1.1: arrow_path verilmişse pickle yerine memory-mapped Arrow okur
+    (zero-copy, worker'lar arası paylaşım).
+    """
     import pickle
-    db_window  = pickle.loads(db_bytes)
     alpha_cfg  = pickle.loads(alpha_cfg_bytes)
     mining_cfg = pickle.loads(mining_cfg_bytes)
     mining_cfg.seed = trial_seed
+
+    if arrow_path:
+        try:
+            from engine.data.arrow_db import MarketDB
+            db = MarketDB(arrow_path)
+            if arrow_start and arrow_end:
+                db_window = db.slice_pandas(arrow_start, arrow_end)
+            else:
+                db_window = db.to_pandas(cache=False)
+        except Exception as exc:
+            # Arrow başarısız → pickle fallback
+            db_window = pickle.loads(db_bytes)
+    else:
+        db_window  = pickle.loads(db_bytes)
 
     from engine.strategies.mining_runner import run_mining_window
     return run_mining_window(db_window, alpha_cfg, mining_cfg)
@@ -164,13 +184,38 @@ def run_parallel_mining(
         mining_cfg = pickle.loads(pickle.dumps(mining_cfg))  # shallow copy
         mining_cfg.prob_df = prob_df
 
-    db_bytes       = pickle.dumps(db)
+    # Faz 1.1: Arrow memory-mapped DB (zero-copy worker sharing)
+    arrow_path: str | None = None
+    arrow_start: str | None = None
+    arrow_end:   str | None = None
+    try:
+        from engine.data.arrow_db import materialize_arrow_db
+        import os, tempfile
+        # db DataFrame'i geçici parquet'e yaz, Arrow'a dönüştür
+        # (tek seferlik; sonraki trial'lar mmap ile zero-copy okur)
+        tmp_dir = os.environ.get("MINERVA_ARROW_DIR", tempfile.gettempdir())
+        os.makedirs(tmp_dir, exist_ok=True)
+        tmp_parquet = os.path.join(tmp_dir, f"mining_db_{os.getpid()}.parquet")
+        db.to_parquet(tmp_parquet, index=False)
+        arrow_path = materialize_arrow_db(tmp_parquet,
+                                           out_path=tmp_parquet.replace(".parquet", ".arrow"))
+        if "Date" in db.columns:
+            arrow_start = str(db["Date"].min())
+            arrow_end   = str(db["Date"].max())
+        logger.info("Arrow mmap aktif: %s", arrow_path)
+    except Exception as exc:
+        logger.debug("Arrow yolu başarısız (%s) — pickle fallback", exc)
+        arrow_path = None
+
+    db_bytes       = pickle.dumps(db) if arrow_path is None else b""
     alpha_bytes    = pickle.dumps(alpha_cfg)
     mining_bytes   = pickle.dumps(mining_cfg)
 
     logger.info(
-        "Paralel mining başlıyor: %d trial × %d worker  DB=%.1f MB",
-        n_trials, n_workers, len(db_bytes) / 1e6,
+        "Paralel mining başlıyor: %d trial × %d worker  DB=%.1f MB  arrow=%s",
+        n_trials, n_workers,
+        (len(db_bytes) if db_bytes else 0) / 1e6,
+        bool(arrow_path),
     )
 
     all_results: list = []
@@ -184,6 +229,9 @@ def run_parallel_mining(
                 db_bytes,
                 alpha_bytes,
                 mining_bytes,
+                arrow_path,
+                arrow_start,
+                arrow_end,
             ): seed
             for seed in seeds
         }
