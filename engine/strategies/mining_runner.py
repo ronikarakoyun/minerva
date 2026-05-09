@@ -42,15 +42,15 @@ class MiningConfig:
     wf_n_folds: int = 5
     wf_embargo: int = 5
     wf_purge: int = 10
-    lambda_std: float = 2.0
-    lambda_cx: float = 0.003
+    lambda_std: float = 1.0
+    lambda_cx: float = 0.001
     lambda_size: float = 0.5
     size_corr_hard_limit: float = 0.7
     neutralize: bool = True
     target_col: str = "Next_Ret"
     seed: int = 42
-    min_mean_ric: float = 0.003   # Kabul eşiği
-    min_pos_ratio: float = 0.4
+    min_mean_ric: float = 0.001   # Kabul eşiği
+    min_pos_ratio: float = 0.25
     # DSR gating — True ise top-100 havuzu DSR testi ile filtreler
     use_dsr_filter: bool = False
     dsr_min_p: float = 0.75       # DSR p-value minimum eşiği (0.75 = %75 güven)

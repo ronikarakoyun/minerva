@@ -157,8 +157,8 @@ def compute_wf_fitness(
     evaluate_fn,                     # cfg.evaluate gibi (tree, idx) -> Series
     idx: pd.DataFrame,               # MultiIndex (Ticker, Date) + hedef kolonu
     folds: "list[np.ndarray] | list[dict]",
-    lambda_std: float = 2.0,
-    lambda_cx: float = 0.003,
+    lambda_std: float = 1.0,
+    lambda_cx: float = 0.001,
     min_valid_folds: int = 3,
     target_col: str = "Next_Ret",    # "Next_Ret" veya "TB_Label"
     neutralize: bool = False,        # Faktör nötralizasyonu uygula

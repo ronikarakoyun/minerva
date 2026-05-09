@@ -46,14 +46,14 @@ class MiningRequest(BaseModel):
     wf_n_folds: int = Field(default=5, ge=2, le=20)
     wf_embargo: int = Field(default=5, ge=0, le=30)
     wf_purge: int = Field(default=10, ge=0, le=60)
-    lambda_std: float = Field(default=2.0, ge=0.0, le=20.0)
-    lambda_cx: float = Field(default=0.003, ge=0.0, le=1.0)
+    lambda_std: float = Field(default=1.0, ge=0.0, le=20.0)
+    lambda_cx: float = Field(default=0.001, ge=0.0, le=1.0)
     lambda_size: float = Field(default=0.5, ge=0.0, le=10.0)
     size_corr_hard_limit: float = Field(default=0.7, ge=0.1, le=1.0)
     neutralize: bool = True
     seed: int = Field(default=42, ge=0)
-    min_mean_ric: float = Field(default=0.003, ge=0.0, le=1.0)
-    min_pos_ratio: float = Field(default=0.4, ge=0.0, le=1.0)
+    min_mean_ric: float = Field(default=0.001, ge=0.0, le=1.0)
+    min_pos_ratio: float = Field(default=0.25, ge=0.0, le=1.0)
     save_to_catalog: bool = True
 
 
