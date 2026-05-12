@@ -56,6 +56,7 @@ class MiningConfig:
     seed: int = 42
     min_mean_ric: float = 0.003   # Kabul eşiği
     min_pos_ratio: float = 0.4
+    min_valid_folds: int = 2      # 3 → 2: fold geçerlilik eşiği (gevşetildi)
     # DSR gating — True ise top-100 havuzu DSR testi ile filtreler
     use_dsr_filter: bool = False
     dsr_min_p: float = 0.75       # DSR p-value minimum eşiği (0.75 = %75 güven)
@@ -314,7 +315,7 @@ def _run_mining_window_impl(
     wf_kwargs = dict(
         lambda_std=mcfg.lambda_std,
         lambda_cx=mcfg.lambda_cx,
-        min_valid_folds=3,
+        min_valid_folds=getattr(mcfg, "min_valid_folds", 2),  # 3 → 2 gevşetildi
         target_col=mcfg.target_col,
         neutralize=mcfg.neutralize,
         factor_cache=factor_cache,
