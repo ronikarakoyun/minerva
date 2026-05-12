@@ -772,6 +772,11 @@ def run_walk_forward(
                           date_t.date(), exc)
 
         # F. RL leverage
+        # BIST'te kaldıraç (margin) mevcut değil → leverage max 1.0 ile sınırlandır.
+        # RL, "ne kadar nakit tutacağını" belirler:
+        #   leverage=0.5 → paranın %50'si hisseye, %50 nakit (savunmacı mod)
+        #   leverage=1.0 → paranın %100'ü hisseye (tam yatırım)
+        #   leverage>1.0 → fiziksel olarak imkânsız → 1.0'a indir
         leverage = 1.0
         if rl_agent is not None:
             _recent_ic = _compute_recent_ic(PAPER_TRADES_PATH, date_t, lookback_days=20)
@@ -779,7 +784,7 @@ def run_walk_forward(
                                        recent_ic=_recent_ic)
             with torch.no_grad():
                 action, _ = rl_agent.act(state.to_array())
-            leverage = ACTIONS[action]
+            leverage = min(ACTIONS[action], 1.0)   # BIST kaldıraç kısıtı
             current_scale = leverage
         today_weights = today_weights * leverage
 
