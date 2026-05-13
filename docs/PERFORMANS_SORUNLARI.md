@@ -225,57 +225,92 @@ labels = (df_feat["fitness"] > median_fitness).astype(int).values
 
 ### 🟠 Tier 2 — Çok Muhtemel Katkıda Bulunanlar
 
-#### S5. Survivorship Bias (Çözümü Sınırlı)
+#### S5. Survivorship Bias (Brown-Goetzmann-Ross 1992)
 
 **Sorun:**
 `market_db.parquet` sadece **bugün** BIST'te listeli olan hisseleri
 içeriyor. Delist olmuş şirketler (genelde önce düşüş yaşar → delist) eksik.
 
-**Etki:**
-- Backtest gerçeklikten %30-50 daha pozitif sonuç gösterebilir (CRO notu)
-- 2018 BIST krizi gibi dönemlerde delist olan şirketler veride yok
-  → görünür performans gerçeğinden yüksek
+**Akademik dayanak (NotebookLM):**
+> *"Brown, Goetzmann, Ibbotson ve Ross (1992) hayatta kalma önyargısının
+> volatilite ve getiri arasında sahte bir ilişki yarattığını gösterir.
+> Yüksek risk alan fonlar ya çok büyük zarar edip silinir ya da yüksek
+> getiri elde edip 'hayatta kalır'. Sadece hayatta kalanların verisine
+> bakıldığında 'yüksek risk → yüksek getiri' yanılgısı oluşur."*
+> — **Brown-Goetzmann-Ross 1992**, *Survival*
 
-**Çözüm seçenekleri:**
-1. **İdeal:** Bloomberg/Refinitiv historical constituents data ($$$)
-2. **Pragmatik:** Backtest sonucundan **belirgin oranda azaltarak** raporla
-3. **Orta:** KAP halka açık delisting verisini scrape et
+**Çözüm — Residual Standard Deviation Adjustment:**
+> *"Brown ekibi performans ölçümlerinin (Alpha) doğrudan ARTIK STANDART
+> SAPMAYA bölünerek normalize edilmesini robust bir çözüm olarak önerir.
+> Yüksek risk alıp şans eseri hayatta kalan hisselerin performansı,
+> taşıdıkları yüksek artık std'ye bölündüğünde matematiksel olarak
+> törpülenir → sahte 'yetenek' illüzyonu ortadan kalkar."*
 
-**Mevcut durumda not:** Bu sorunu çözmek altyapı dışı (veri sağlayıcı
-gerekli). Şimdilik "gerçek performans backtest'in %60-70'i" varsayımıyla
-yaşamak gerekir.
+```python
+# Şampiyon seçim ÖNCESİ uygulanır:
+def survivorship_adjusted_score(formula_alpha, residual_std):
+    """Brown-Goetzmann-Ross 1992 düzeltmesi."""
+    return formula_alpha / max(residual_std, 1e-6)
+# Yüksek alpha + yüksek residual std → düşük adjusted skor (cezalandırılır)
+```
+
+**Median Adjustment YAPMA:**
+> *"BIST gibi gelişmekte olan piyasalarda kriz dönemlerinde yatay-kesit
+> bağımlılığı (cross-sectional dependence) çok yüksek. Bu nedenle median
+> adjustment kullanmak tehlikeli — residual std dev adjustment kullan."*
+
+**Pragmatik etki:**
+- Kısa vadeli: residual std normalize ile mevcut backtest sonucunu
+  yaklaşık %30-50 haircut'lı yorumla
+- Uzun vadeli: Bloomberg/Refinitiv historical constituents ($$)
+- KAP halka açık delisting kayıtları scrape edilebilir
 
 ---
 
-#### S6. Slipaj Modeli Market-Impact Aware Değil
+#### S6. Slipaj Modeli Market-Impact Aware Değil (Cont-Kukanov-Stoikov 2014)
 
 **Sorun:**
 `SlippageConfig(use_dynamic_slippage=False)` → sabit bps. Loglar
-"SLIP_CAP 200 bps aşımı" uyarılarıyla dolu — bu, gerçek slipajın
-modellenenden çok daha yüksek olduğunu gösteriyor.
+"SLIP_CAP 200 bps aşımı" uyarılarıyla dolu — gerçek slipaj
+modellenenden çok daha yüksek.
 
-**Akademik dayanak (Cont-Kukanov-Stoikov 2011):**
-```
-slippage_pct = β × (order_size / market_depth)
-β = c / market_depth^λ
-```
+**Akademik dayanak (NotebookLM):**
+
+> *"Cont-Kukanov-Stoikov 2014 modeli: ΔP = β × OFI + ε, burada
+> β = c / AD^λ. Yani fiyat etkisi piyasa derinliğine ters orantılı.
+> Cont ekibinin 50 hisse üzerindeki testleri **λ ≈ 1** olduğunu, hatta
+> 50'nin 35'inde λ=1 hipotezinin reddedilemediğini gösterir.
+> Pratik implementasyonda λ=1 güçlü ve güvenilir bir yaklaşım.
+> c parametresi ampirik olarak 0.5'ten düşük çıkar (orta-fiyat
+> emirlere daha dirençli)."*
+
+**Kalibrasyon adımları:**
+1. Her hisse için yarım saatlik pencerelerde `Δp = α + β·OFI + ε` regresyon
+2. `log β = α_L - λ·log AD + ε_L` → λ tahmini (≈1)
+3. `β = α_M + c/AD^λ + ε_M` → c tahmini (BIST için 0.05-0.30 bekleniyor)
 
 **Çözüm:**
 `engine/execution/cont_stoikov_slippage.py` (yeni dosya):
 ```python
-def cont_stoikov_slippage(order_size_TL, market_depth_TL, c=0.1, lambda_p=0.5):
-    if market_depth_TL <= 0:
-        return 0.02  # 2% fallback
-    beta = c / (market_depth_TL ** lambda_p)
-    return beta * (order_size_TL / market_depth_TL)
+def cont_stoikov_slippage(order_size_shares, market_depth_shares,
+                           c=0.15, lambda_p=1.0):
+    """
+    Cont-Kukanov-Stoikov 2014 OFI tabanlı slipaj.
+    λ=1 varsayımı: 50 hissenin 35'inde reddedilemiyor.
+    c=0.15: BIST için tahmin (offline kalibre edilmeli).
+    """
+    if market_depth_shares <= 0:
+        return 0.02  # %2 fallback
+    beta = c / (market_depth_shares ** lambda_p)
+    return beta * order_size_shares  # fiyat etkisi (TL cinsinden)
 ```
 
 Mevcut `engine/execution/slippage.py` zaten dynamic slippage destekliyor
 ama `use_dynamic_slippage=False` ile devre dışı. Sebep "tarihsel basit;
-dynamic çok yavaş" — bu bir performans sorunu, fonksiyonel değil.
+dynamic çok yavaş" — bu performans sorunu, fonksiyonel değil.
 
 **Geçici çözüm:** Sabit slipajı 30 → 60 bps çıkar (gerçek BIST illikit
-hisse için), nihai çözümde Cont-Stoikov.
+hisse için), nihai çözümde Cont-Stoikov OFI kalibrasyonu.
 
 ---
 
@@ -300,38 +335,45 @@ son 30 günde en iyi olanı seç.
 
 ---
 
-#### S8. Sinyal Yönü OOS Verifikasyonu Yok
+#### S8. Sinyal Yönü OOS Verifikasyonu Yok (Adversarial Reverse Test)
 
 **Sorun:**
 `mean_ric > 0` → "bu formül pozitif yön gösteriyor" varsayımı.
 Ama in-sample yön, OOS'ta tersine dönebilir (sign flip).
 
-**Akademik dayanak:**
-> *"The IS optimal strategy is so closely tied to the noise contained
-> in the training set that further optimization becomes pointless or
-> even detrimental for the purpose of extracting the signal."*
-> — Bailey et al. (2015)
+**Akademik dayanak (NotebookLM):**
 
-**Çözüm:**
-S1'in (OOS holdout) parçası olarak yapılır:
-- Holdout IC > 0 → işaret aynı, formülü kullan
-- Holdout IC < 0 → işaret ters, **formülü çevir** (signal *= -1)
-- Holdout |IC| < threshold → formülü at
+> *"Adversarial Reverse Test kuralı: **Forward Sharpe > 0 VE Reverse
+> Sharpe < -0.5** olmalıdır. Sadece negatif reverse Sharpe yetmez
+> (-0.1, -0.2), `< -0.5` eşiği gerekir.*
+>
+> *Ters çevrilmiş sinyallerin `<-0.5` Sharpe ile çökmesi, formülün
+> tesadüfi piyasa betası taşımadığını ve yön bulma konusunda saf
+> bir yeteneğe sahip olduğunu kanıtlar. Hafif negatif reverse Sharpe
+> (-0.1) ise alfanın aslında long-bias/drift'ten geldiğini gösterir."*
+> — **Minerva v4 Vision Plan §2.4 (Bailey 2015 anti-skill detection)**
+
+**Çözüm — 3 hipotez:**
 
 ```python
-# Adversarial reverse test (Faz 2 işkence test süitinden):
-forward_sharpe = compute_sharpe(formula_signal, future_returns)
-reverse_sharpe = compute_sharpe(-formula_signal, future_returns)
+# Holdout (S1) verisinde:
+forward_sharpe = compute_sharpe(signal, future_returns)
+reverse_sharpe = compute_sharpe(-signal, future_returns)
+
 if forward_sharpe > 0 and reverse_sharpe < -0.5:
-    # Gerçek alfa — sign tutarlı
-    use_formula(formula, sign=+1)
+    # GERÇEK ALFA — sign tutarlı, beta gürültüsü yok
+    use_formula(tree, sign=+1)
 elif reverse_sharpe > 0 and forward_sharpe < -0.5:
-    # Tersine çalışıyor — sign flip
-    use_formula(formula, sign=-1)
+    # SIGN FLIP — in-sample IS yöne göre yorumlandı ama
+    # gerçekte tersine çalışıyor (overfit, classic OOS reversal)
+    use_formula(tree, sign=-1)
 else:
-    # Gürültü — formülü at
-    skip(formula)
+    # GÜRÜLTÜ ya da MARKET BETA — atılması daha güvenli
+    skip(tree)
 ```
+
+**Beklenen etki:** Her çeyrek 902 formül → ~10-20 "gerçek alfa" kalır.
+Aşırı seçici ama OOS güvenli.
 
 ---
 
@@ -379,52 +421,116 @@ Mode collapse + alpha decay riski.
 
 ---
 
-#### S11. Rejim-Koşullu Formül Üretilmiyor
+#### S11. Rejim-Koşullu Formül Üretilmiyor (Hamilton 1989, Ang-Bekaert 2002)
 
 **Sorun:**
 HMM K=2 rejim diyor → boğa/ayı farklı dinamik. Ama MCTS tüm veride
 **tek havuz** üretiyor, sonra "regime_0 champion = top-1, regime_1 = top-2"
 diye atıyor. Gerçek rejim-koşullu değil.
 
-**Doğrusu:**
-- Bull rejimi günlerinde sadece bull verisiyle mining
-- Bear rejimi günlerinde sadece bear verisiyle mining
-- Sonuç: rejim başına özel optimize edilmiş formüller
+**Akademik dayanak (NotebookLM):**
 
-**Çözüm:**
+> *"Hamilton 1989 Markov-Switching modeli: rejim 'gizli' Markov zinciri ile
+> çıkarsanır. Seriyi açıklayan parametreler (ortalama getiri, varyans,
+> AR katsayıları) farklı rejimlere göre yapısal olarak değişir.*
+>
+> *Ang-Bekaert 2002: Boğa rejimi = düşük korelasyon + düşük volatilite +
+> yüksek beklenen getiri; Ayı rejimi = yüksek korelasyon + yüksek
+> volatilite + düşük beklenen getiri. Rejimler **kalıcıdır (persistent)** —
+> bir kriz rejimi başladığında hemen bitmez, momentum süreci izler."*
+
+**Pratik sonuç:**
+Bull rejiminde "düşük vol momentum" formülü iyi çalışırken, bear
+rejiminde "high vol mean-reversion" iyi çalışabilir. Tek havuzda
+top-K seçmek bu farkı yakalamaz.
+
+**Çözüm — Rejim Başına Bağımsız Mining:**
 ```python
 for regime_id in range(hmm._best_K):
+    # Rejimin baskın olduğu günleri al (prob > 0.7)
     regime_dates = prob_df[prob_df[f"regime_{regime_id}"] > 0.7].index
     regime_df = train_df[train_df["Date"].isin(regime_dates)]
-    if len(regime_df) >= 200:  # yeterli veri
-        regime_results = run_mining_window(regime_df, ...)
-        regime_champion = pick_top_by_fitness(regime_results)
+    if len(regime_df) >= 200:  # min veri eşiği
+        # Sadece bu rejim verisinde mining
+        regime_results = run_mining_window(regime_df, alpha_cfg, mining_cfg)
+        # Bu rejime özel şampiyon (fitness ile)
+        regime_champion = max(regime_results, key=lambda r: r.fitness)
         save_regime_champion(regime_id, regime_champion)
 ```
 
+**Ang-Bekaert kalıcılığa uyarı:** Rejim transition matrix
+`P(stay) = 0.85+` → bir rejim başladığında ortalama 6-12 hafta sürer.
+Yani Q1'de bull rejiminde başlayan çeyrek, Q3'te ayı'ya geçebilir →
+çeyrek-içi rejim refresh gerekli (S7 ile bağlantılı).
+
 **Beklenen etki:** Rejim geçişlerinde whipsaw azalır, her rejim için
-"konuşkan" formül.
+"konuşkan" formül. Ang-Bekaert: "ayı rejiminde çeşitlendirme bile
+fayda sağlar — kondisyonel hedging değerlidir."
 
 ---
 
 ### ⚪ Tier 4 — Kod Kalitesi / Operasyonel
 
-#### S12. ERC Her Zaman %100 Yatırımlı
+#### S12. ERC Her Zaman %100 Yatırımlı (Kritzman-Li 2010 Turbulence)
 
 **Sorun:**
 `equal_risk_contribution` çıktısı her zaman toplam=1.0. Yüksek
 volatilite günlerinde de %100 exposure.
 
-**Çözüm:**
-Turbulence index (Yang et al. 2020, Faz 4 planında):
+**Akademik dayanak (NotebookLM):**
+
+> *"Kritzman-Li 2010 'Skulls, Financial Turbulence, and Risk Management':*
+> *Mahalanobis distance (1927 antropoloji formülü) finansal türbülans
+> ölçümüne uyarlandı. Tarihsel ortalamadan sapma + korelasyon
+> kırılımları + 'ilişkisiz' varlıkların aniden birlikte hareketi.*
+>
+> *Türbülans 75. persentil üstünde → 'turbulent' kabul edilir
+> (verinin en aşırı %25'i).*
+>
+> *Türbülans haftalarca sürer (uçak türbülansı gibi) — başladığında
+> hemen bitmez."*
+
+**Çözüm — Quintile-based Inverse Exposure:**
+> *"Pozisyon ağırlığı türbülans şiddetiyle TERS ORANTILI olarak
+> ölçeklenir (carry trade örneği):*
+>
+> *| Türbülans Quintile | Exposure |*
+> *|---|---|*
+> *| 1. (en yüksek) | %20 |*
+> *| 2. | %40 |*
+> *| 3. | %60 |*
+> *| 4. | %80 |*
+> *| 5. (en sakin) | %100 |*
+>
+> *Bu kural negatif çarpıklığı (negative skewness) büyük ölçüde
+> ortadan kaldırır ve VIX, swap spreads gibi diğer stress
+> göstergelerinden daha etkili çalışır."*
+
 ```python
-def turbulence_scale(returns_recent):
-    cov_inv = np.linalg.pinv(np.cov(returns_recent.T))
-    mahalanobis = returns_recent.iloc[-1] @ cov_inv @ returns_recent.iloc[-1]
-    if mahalanobis > threshold:
-        return 0.0  # cash'e geç
-    return 1.0
+def kritzman_li_turbulence(returns_recent: pd.DataFrame,
+                           lookback_years: int = 3) -> float:
+    """Mahalanobis distance: (y - μ)' Σ^-1 (y - μ)."""
+    mu = returns_recent.mean().values
+    cov = returns_recent.cov().values
+    cov_inv = np.linalg.pinv(cov)
+    y = returns_recent.iloc[-1].values
+    d = (y - mu) @ cov_inv @ (y - mu).T
+    return float(d)
+
+def exposure_from_turbulence(turbulence: float,
+                             historical: np.ndarray) -> float:
+    """Quintile-based inverse scaling (Kritzman-Li 2010)."""
+    quintiles = np.percentile(historical, [20, 40, 60, 80])
+    if turbulence <= quintiles[0]: return 1.00
+    elif turbulence <= quintiles[1]: return 0.80
+    elif turbulence <= quintiles[2]: return 0.60
+    elif turbulence <= quintiles[3]: return 0.40
+    else: return 0.20  # en yüksek türbülans
 ```
+
+**Beklenen etki:** Temmuz 2016 darbe günleri gibi yüksek türbülans
+dönemlerinde portföy otomatik %20'ye iner — büyük drawdown'lar
+matematiksel olarak engellenir.
 
 ---
 
@@ -491,16 +597,17 @@ DUCKDB_FALLBACK_COUNTER.inc()
 
 ## Bölüm 5: AKADEMİK REFERANS HARİTASI
 
-| Sorun | Birincil Kaynak | NotebookLM Source ID |
-|---|---|---|
-| S1 (OOS holdout) | López de Prado AFML Ch. 11-12 | `7e39d9b0` |
-| S2 (PBO entegrasyon) | Bailey, Borwein, Lopez de Prado, Zhu 2015 | `3e8cdcbc` |
-| S3 (Beta hedge) | López de Prado ETF Trick (AFML §2.4) | `7e39d9b0` |
-| S6 (Slippage) | Cont-Kukanov-Stoikov 2011 (OFI) | (eklenecek) |
-| S10 (RL retrain) | Pippas et al. 2025 (RL Survey) | `20eaf594` |
-| S11 (Rejim koşullu) | Gu-Kelly-Xiu 2020 (Empirical Asset Pricing) | (NotebookLM) |
-| S12 (Turbulence) | Yang et al. 2020 (FinRL) | (NotebookLM) |
-| S5 (Survivorship) | López de Prado AFML Ch. 4 | (NotebookLM) |
+| Sorun | Birincil Kaynak | NotebookLM Source ID | Durum |
+|---|---|---|---|
+| S1 (OOS holdout) | López de Prado AFML Ch. 11-12 | `7e39d9b0` | ✅ Cevaplandı |
+| S2 (PBO entegrasyon) | Bailey, Borwein, Lopez de Prado, Zhu 2015 | `3e8cdcbc` | ✅ Cevaplandı |
+| S3 (Beta hedge) | López de Prado ETF Trick (AFML §2.4) | `7e39d9b0` | ✅ Cevaplandı |
+| S5 (Survivorship) | Brown-Goetzmann-Ross 1992 | `9bad604a` + `59debe4c` | ✅ Cevaplandı |
+| S6 (Slippage) | Cont-Kukanov-Stoikov 2014 | `c76a4c51` | ✅ Cevaplandı |
+| S8 (Adversarial reverse) | Minerva v4 Plan + Bailey 2015 | `b75acabe` | ✅ Cevaplandı |
+| S10 (RL retrain) | Pippas et al. 2025 (RL Survey) | `20eaf594` | ✅ Cevaplandı |
+| S11 (Rejim koşullu) | Hamilton 1989 + Ang-Bekaert 2002 | `0fb9f1ad` + `a49587e2` | ✅ Cevaplandı |
+| S12 (Turbulence) | Kritzman-Li 2010 | `db2302b2` | ✅ Cevaplandı |
 
 ---
 
@@ -538,12 +645,43 @@ backtest sonuçları %30-50 abartılı kabul edilmeli.
 - 5080353: BIST kaldıraç kısıtı (RL leverage min(1.0))
 - f0d4102: Şampiyon mean_ric → fitness
 
-### Ek B: NotebookLM Sorgu Logları
+### Ek B: NotebookLM Sorgu Logları (Tamamlandı + Eksik)
 Notebook: `Minerva v3` (962f7299-b163-4b62-8c49-492eaae085e6)
-- "Walk-forward + purged k-fold OOS holdout" → AFML §12 alıntıları
-- "CSCV/PBO pipeline entegrasyonu" → Bailey 2015 §3.1, 5.2
-- "RL retraining, mode collapse, PPO statik" → Pippas 2025 §2.3-2.4
-- "VIOP futures beta hedging" → Minerva v4 plan + ETF Trick
+
+**✅ Cevap alınan sorgular:**
+1. Walk-forward + purged k-fold OOS holdout → AFML §12 alıntıları
+2. CSCV/PBO pipeline entegrasyonu → Bailey 2015 §3.1, 5.2
+3. VIOP futures beta hedging + ETF Trick → Lopez de Prado AFML §2.4
+4. RL retraining, mode collapse, PPO statik → Pippas 2025 §2.3-2.4
+5. Cont-Kukanov-Stoikov OFI slipaj kalibrasyonu → λ≈1, c<0.5 ampirik
+6. Survivorship bias (Brown-Goetzmann-Ross 1992) → residual std adjustment
+7. Adversarial reverse test eşiği → forward>0 AND reverse<-0.5
+8. Hamilton 1989 + Ang-Bekaert 2002 regime-switching → persistence,
+   momentum process, bull/bear ayrımı
+9. Kritzman-Li 2010 turbulence → Mahalanobis distance, quintile inverse exposure
+
+**❌ Cevap alınamayan sorgular (timeout — daha fazla kaynak eklenebilir):**
+
+1. **Pippas 2025 Composite Reward Shaping detayları**
+   - `0.6*profit + 0.2*cost + 0.2*expert_imitation` formülünün
+     ağırlık kalibrasyonu nasıl yapılmalı?
+   - Oracle action (perfect foresight) reward'a leakage olmadan
+     nasıl katılır?
+   - **Önerilen kaynak:** Lee et al. MAPS framework paper
+
+2. **Walk-forward mining cadence: aylık vs çeyreklik**
+   - Rolling window genişliği akademik öneri ne?
+   - Hangi sıklıkta retrain optimal?
+   - **Önerilen kaynak:** Bailey-Lopez de Prado "Sharpe Ratio Efficient
+     Frontier" (2012), AFML Ch. 17 backtesting on rolling windows
+
+3. **BIST açığa satış (short selling) SPK regülasyonu**
+   - Hangi hisseler short edilebilir?
+   - Pay senedi ödünç verme (securities lending) maliyetleri?
+   - Long-short market-neutral strateji pratik kısıtlar?
+   - **Önerilen kaynak:** SPK Sermaye Piyasası Kurulu Tebliği
+     (Açığa Satış İşlemleri Hakkında Tebliğ V-101.1), Borsa İstanbul
+     Pay Ödünç Piyasası dökümanı
 
 ### Ek C: Mevcut Kod Eşlemesi
 
