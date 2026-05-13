@@ -293,7 +293,9 @@ def compute_wf_fitness(
                 fric = compute_fold_rank_ic(tmp, fold_dates, method="spearman")
                 if not np.isnan(fric):
                     fold_rics.append(float(fric))
-                continue
+                    continue  # BUG FIX: sadece geçerli değerde atla;
+                              # DuckDB NaN döndürürse pandas fallback'e düş
+                # NaN durumu: continue yok → aşağıdaki pandas fallback çalışır
             except Exception:
                 try:
                     from engine.monitoring.counters import COUNTERS
