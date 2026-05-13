@@ -1,16 +1,16 @@
 {
   "Delta(Pclose, 5)": {
     "status": "ok",
-    "mean_ric": 0.0018490778534769512,
-    "fitness": -0.002751154870185086,
+    "mean_ric": 0.0018393675857943802,
+    "fitness": -0.0027794979070806386,
     "complexity": 3,
     "pos_folds": 3,
     "n_folds": 4
   },
   "Std(Pclose, 20)": {
     "status": "ok",
-    "mean_ric": -0.005201939972098559,
-    "fitness": -0.28078851309477093,
+    "mean_ric": -0.005160287115676079,
+    "fitness": -0.2807778461262276,
     "complexity": 3,
     "pos_folds": 1,
     "n_folds": 4
@@ -25,16 +25,16 @@
   },
   "Rank(Pclose, 20)": {
     "status": "ok",
-    "mean_ric": -0.0009266785931603991,
-    "fitness": -0.006992001880754237,
+    "mean_ric": -0.0008839114152989058,
+    "fitness": -0.006982346100010284,
     "complexity": 3,
     "pos_folds": 1,
     "n_folds": 4
   },
   "Corr(Pclose, Vlot, 20)": {
     "status": "ok",
-    "mean_ric": -0.019565127732927314,
-    "fitness": -0.025261404040838955,
+    "mean_ric": -0.019685892013522395,
+    "fitness": -0.025348388887049846,
     "complexity": 4,
     "pos_folds": 0,
     "n_folds": 4

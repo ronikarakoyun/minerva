@@ -102,8 +102,13 @@ def compute_per_date_rank_ic(tmp_df: pd.DataFrame,
                     )
                 """).fetchone()
             con.close()
-        ic = result[0] if result and result[0] is not None else 0.0
-        return float(ic) if not np.isnan(ic) else 0.0
+        # BUG FIX: result boş / NULL ise NaN döndür (0.0 DEĞİL).
+        # 0.0 fold_rics'e geçerli değer olarak eklenir, NaN ise pandas fallback'e düşer.
+        # Bu fark Q3 2016+ darbe dönemi gibi sparse data periyotlarında belirleyici.
+        if not result or result[0] is None:
+            return float("nan")
+        ic = result[0]
+        return float(ic) if not np.isnan(ic) else float("nan")
     except Exception as exc:
         logger.warning("DuckDB IC hatası (%s) — pandas fallback", exc)
         return _pandas_fallback(tmp_df, method)
@@ -124,16 +129,21 @@ def compute_fold_rank_ic(tmp_df: pd.DataFrame,
 
 
 def _pandas_fallback(tmp_df: pd.DataFrame, method: str) -> float:
-    """Pandas fallback (eski yol — DuckDB yoksa)."""
+    """Pandas fallback (eski yol — DuckDB yoksa).
+
+    BUG FIX: Boş / hesaplanamayan durumlarda 0.0 değil NaN döndürür.
+    0.0 fold_rics'e geçerli sinyal olarak eklenirse mean_ric=0 → filter başarısız.
+    NaN ise çağıran taraf fold'u atlar veya retry yapar.
+    """
     if len(tmp_df) == 0:
-        return 0.0
+        return float("nan")
     try:
         ics = tmp_df.groupby("Date").apply(
             lambda g: g["Signal"].corr(g["Target"], method=method)
-            if g["Signal"].std() > 0 else 0.0,
+            if g["Signal"].std() > 0 else float("nan"),
             include_groups=False,
         )
         ic = ics.dropna().mean()
-        return float(ic) if not np.isnan(ic) else 0.0
+        return float(ic) if not np.isnan(ic) else float("nan")
     except Exception:
-        return 0.0
+        return float("nan")
