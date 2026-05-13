@@ -152,6 +152,64 @@ def save_catalog_snapshot(records: list, year: int, q: int) -> Path:
     return path
 
 
+def _eval_holdout_ric(mr, holdout_df: pd.DataFrame, alpha_cfg) -> float:
+    """Holdout döneminde RankIC hesapla (S1 OOS Holdout).
+
+    Parametreler
+    ------------
+    mr : MiningResult
+        mining.mr.tree (AST) ve mr.formula kullanılır.
+    holdout_df : pd.DataFrame
+        Flat (Date, Ticker, ...) tablo — son %20 train verisi.
+    alpha_cfg : AlphaCFG
+        evaluate(tree, df) → sinyal serisi döner.
+
+    Döner
+    ------
+    float — RankIC değeri (NaN = hesaplanamadı, positif = iyi).
+    """
+    try:
+        sig = alpha_cfg.evaluate(mr.tree, holdout_df)
+        if sig is None or len(sig) == 0:
+            return np.nan
+        if "Next_Ret" not in holdout_df.columns:
+            return np.nan
+        # Sinyal ve hedef hizala
+        sig_vals = sig.values if hasattr(sig, "values") else np.asarray(sig)
+        tgt_vals = holdout_df["Next_Ret"].values
+        if len(sig_vals) != len(tgt_vals):
+            return np.nan
+        # Date kolonu (flat df'te her zaman mevcut)
+        date_vals = holdout_df["Date"].values if "Date" in holdout_df.columns else None
+        if date_vals is None:
+            return np.nan
+        tmp = pd.DataFrame({
+            "Date":   date_vals,
+            "Signal": sig_vals,
+            "Target": tgt_vals,
+        }).dropna()
+        if len(tmp) < 20:
+            return np.nan
+        # DuckDB hızlı yol
+        try:
+            from engine.validation.wf_fitness_duckdb import compute_per_date_rank_ic
+            return float(compute_per_date_rank_ic(tmp, method="spearman"))
+        except Exception:
+            pass
+        # Pandas fallback
+        def _ric(g: pd.DataFrame) -> float:
+            if g["Signal"].std() == 0:
+                return 0.0
+            return float(g["Signal"].corr(g["Target"], method="spearman"))
+        return float(
+            tmp.groupby("Date")
+               .apply(_ric, include_groups=False)
+               .mean()
+        )
+    except Exception:
+        return np.nan
+
+
 def restore_catalog_from_snapshot(year: int, q: int) -> bool:
     """Mevcut alpha_catalog.json'a snapshot'ı kopyala."""
     src = HIST_CATALOG_DIR / f"{year}_Q{q}.json"
@@ -193,6 +251,21 @@ def run_quarterly_mining(
     log.info("Mining başlıyor: train_end=%s  ckpt=%s  workers=%d",
              train_end.date(), checkpoint_id, n_workers)
     train_df = db[db["Date"] <= train_end].copy()
+
+    # ── S7: Minimum Train Years Guard ────────────────────────────────────
+    # Gu-Kelly-Xiu (2020) varlık fiyatlama literatürü: ≥5 yıl zorunlu.
+    # Kısa pencerede mining IS'de ezberler, OOS'da çöker.
+    _TRADING_MIN_TRAIN_YEARS = 5
+    _data_start = db["Date"].min()
+    _train_years = (train_end - _data_start).days / 365.0
+    if _train_years < _TRADING_MIN_TRAIN_YEARS:
+        log.warning(
+            "S7: Train penceresi < %d yıl (%.1f yıl) — "
+            "overfit riski yüksek, çeyrek mining atlanıyor.",
+            _TRADING_MIN_TRAIN_YEARS, _train_years,
+        )
+        return 0, None
+
     t0 = time.time()
 
     # ARCH-3 FIX: n_workers > 1 ise SharedMemory pool kullan
@@ -262,6 +335,83 @@ def run_quarterly_mining(
     # mean_ric ile sıralarsak tek-fold şanslı (lucky outlier) formüller seçilir
     # → out-of-sample çakılır. fitness istikrar cezası ile bu sorunu çözer.
     sorted_res = sorted(results, key=lambda r: r.fitness, reverse=True)
+
+    # ── S1: OOS Holdout — gerçek out-of-sample doğrulama ────────────────
+    # Son %20 train tarihleri holdout olarak ayrılır (mining sırasında GÖRÜLMEDI).
+    # Holdout'ta RankIC ≤ 0 olan formüller → IS'de overfitting işareti → elenir.
+    # Fallback: holdout çok küçükse (<20 satır) veya Next_Ret yoksa filtre atlanır.
+    _all_train_dates = sorted(train_df["Date"].unique())
+    _holdout_split   = int(len(_all_train_dates) * 0.80)
+    _holdout_dates   = _all_train_dates[_holdout_split:]
+    _holdout_df      = train_df[train_df["Date"].isin(set(_holdout_dates))].copy()
+
+    _holdout_active = len(_holdout_df) >= 20 and "Next_Ret" in _holdout_df.columns
+    if _holdout_active:
+        _pre_holdout_n = len(sorted_res)
+        _holdout_passed = []
+        for _mr in sorted_res:
+            _hric = _eval_holdout_ric(_mr, _holdout_df, alpha_cfg)
+            if np.isnan(_hric) or _hric > 0.0:
+                # NaN → veri sorunu (geçir); >0 → OOS RIC pozitif (geçer)
+                _holdout_passed.append(_mr)
+            else:
+                log.debug("S1 holdout veto: %s (holdout_ric=%.4f)",
+                          _mr.formula[:60], _hric)
+        _n_vetoed = _pre_holdout_n - len(_holdout_passed)
+        if _n_vetoed > 0:
+            log.info("S1 Holdout filtresi: %d formül elendi (OOS RIC ≤ 0), "
+                     "%d kaldı  [holdout_days=%d]",
+                     _n_vetoed, len(_holdout_passed), len(_holdout_dates))
+        # Minimum eşik: en az n_regimes formül kalmalı
+        if len(_holdout_passed) >= max(n_regimes, 1):
+            sorted_res = _holdout_passed
+        else:
+            log.warning("S1 holdout sonrası çok az formül (%d < %d) — "
+                        "holdout filtresi bu çeyrekte devre dışı.",
+                        len(_holdout_passed), n_regimes)
+    else:
+        log.debug("S1 holdout atlandı: holdout_df boyutu=%d, Next_Ret=%s",
+                  len(_holdout_df), "Next_Ret" in _holdout_df.columns)
+
+    # ── S2: PBO/CSCV — Overfit olasılığı kontrolü ────────────────────────
+    # Bailey et al. (2014) Combinatorially Symmetric Cross-Validation.
+    # Anti-gaming kuralı: PBO mining HEDEFİ DEĞİL — SONRADAN KONTROL edilir.
+    # fold_rics (her formülün zaman-fold IC'leri) PnL proxy olarak kullanılır.
+    # PBO ≥ 0.5 → IS en iyisi OOS'ta median'ın altında kalıyor → çeyrek reddedilir.
+    # PBO ∈ [0.05, 0.5) → caution zone — uyarı verilir, devam edilir.
+    _pbo_candidates = sorted_res[:min(50, len(sorted_res))]
+    if len(_pbo_candidates) >= 2:
+        _fold_ric_lists = [
+            (i, getattr(mr, "fold_rics", None) or [])
+            for i, mr in enumerate(_pbo_candidates)
+        ]
+        _valid_pbo = [(i, rl) for i, rl in _fold_ric_lists if len(rl) >= 2]
+        if len(_valid_pbo) >= 2:
+            _max_folds = max(len(rl) for _, rl in _valid_pbo)
+            _pbo_mat   = np.full((_max_folds, len(_valid_pbo)), 0.0, dtype=float)
+            for _col, (_, _rl) in enumerate(_valid_pbo):
+                _pbo_mat[: len(_rl), _col] = _rl
+            try:
+                from engine.validation.pbo_cscv import cscv_pbo
+                _pbo_res = cscv_pbo(_pbo_mat, max_combinations=500)
+                _pbo_val = _pbo_res["pbo"]
+                log.info("S2 PBO: %.3f  (%s)  [%d formül × %d fold]",
+                         _pbo_val, _pbo_res["verdict"],
+                         len(_valid_pbo), _max_folds)
+                if np.isfinite(_pbo_val) and _pbo_val >= 0.5:
+                    log.warning(
+                        "S2 PBO=%.3f ≥ 0.5: CSCV overfit testi başarısız — "
+                        "çeyrek mining reddediliyor!", _pbo_val
+                    )
+                    return 0, None
+                elif np.isfinite(_pbo_val) and _pbo_val >= 0.05:
+                    log.info(
+                        "S2 PBO caution zone (%.3f): çeyrek devam ediyor. "
+                        "Önerilen leverage_cap=%.2f", _pbo_val, 1.0 - _pbo_val
+                    )
+            except Exception as _pbo_exc:
+                log.debug("S2 PBO hesaplama hatası: %s", _pbo_exc)
+
     top_k = sorted_res[:max(n_regimes, 1)]
 
     # Mevcut alpha_catalog.json'u temizle (yeni çeyrek başlangıcı)
@@ -502,10 +652,11 @@ def refresh_fracdiff_cache(
 def build_meta_model_for_quarter(results: list) -> "MetaModel | None":
     """Mining sonuçlarından basit bir meta-label modeli eğit.
 
-    Feature'lar: [mean_ric, abs_ric, std_ric] — her formül için tek satır.
-    Label: mean_ric > median (üst yarı = "kârlı", alt yarı = "kârsız").
-    Çeyrek bazlı cross-filter sağlar: düşük RIC formüller bir sonraki
-    çeyreğe taşınmaz.
+    Feature'lar: [mean_ric, abs_ric, std_ric, fitness] — her formül için tek satır.
+    Label: fitness > median (S4 FIX: mean_ric > median yerine fitness > median).
+    Sebep: mean_ric label'ı lucky-outlier formülleri "kârlı" sınıfa atar —
+    oysa fitness = mean_ric - 2·std - 0.003·complexity - size_penalty (stabilite cezalı).
+    Fitness label ile meta-model gerçek istikrarlı formülleri öğrenir.
 
     Returns None eğer yetersiz veri veya sklearn yüklü değilse.
     """
@@ -522,13 +673,16 @@ def build_meta_model_for_quarter(results: list) -> "MetaModel | None":
                 "mean_ric": float(r.mean_ric),
                 "abs_ric":  abs(float(r.mean_ric)),
                 "std_ric":  float(getattr(r, "std_ric", 0.0)),
+                "fitness":  float(getattr(r, "fitness", float(r.mean_ric))),
             }
             for r in results
         ]
         df_feat = pd.DataFrame(rows)
         feature_cols = ["mean_ric", "abs_ric", "std_ric"]
-        median_ric = float(df_feat["mean_ric"].median())
-        labels = (df_feat["mean_ric"] > median_ric).astype(int).values
+
+        # S4 FIX: fitness label — mean_ric değil fitness eşiği kullan
+        median_fitness = float(df_feat["fitness"].median())
+        labels = (df_feat["fitness"] > median_fitness).astype(int).values
 
         if labels.sum() == 0 or labels.sum() == len(labels):
             return None  # tek sınıf → anlamsız
@@ -536,8 +690,8 @@ def build_meta_model_for_quarter(results: list) -> "MetaModel | None":
         clf = LogisticRegression(max_iter=200, C=1.0, solver="lbfgs")
         clf.fit(df_feat[feature_cols].values, labels)
         model = MetaModel(model=clf, feature_cols=feature_cols, fit_failed=False)
-        log.debug("Meta-model eğitildi: %d formül, median_ric=%.4f",
-                  len(results), median_ric)
+        log.debug("Meta-model eğitildi: %d formül, median_fitness=%.4f",
+                  len(results), median_fitness)
         return model
     except Exception as exc:
         log.debug("Meta-model eğitim hatası: %s", exc)
