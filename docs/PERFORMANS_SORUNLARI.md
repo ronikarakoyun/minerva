@@ -314,24 +314,83 @@ hisse için), nihai çözümde Cont-Stoikov OFI kalibrasyonu.
 
 ---
 
-#### S7. Çeyreklik Mining → 3 Ay Bayatlık
+#### S7. Mining Cadence ve Train Window Genişliği (REVİZE: Çeyreklik OK, Asıl Sorun Train Window)
 
-**Sorun:**
-Şampiyon çeyrek başı seçilir, 3 ay sonu hâlâ "geçerli" sayılır. HMM
-haftalık rejim güncellese de formüller donmuş.
+**Önceki teşhis YANLIŞTI — literatür çeyrekliği destekliyor.**
 
-**Örnek:** Çeyrek 1 boğa rejiminde başlıyor → momentum formülü şampiyon.
-Çeyrek ortasında ayı rejimine geçiş → momentum hâlâ kullanılıyor → kayıp.
+**Akademik dayanak (NotebookLM):**
 
-**Çözüm seçenekleri:**
-1. **Aylık mining** (3× hesap maliyeti — Oracle'da yapılabilir)
-2. **Rejim transition triggered refresh** (HMM trans matrix entropy ↑ →
-   force re-mining)
-3. **Aylık holdout-based champion rotation** (mining maliyeti yok,
-   sadece mevcut havuzdan yeniden seç)
+> *"Aylık eğitimin dezavantajları: anlık piyasa gürültüsüne aşırı
+> duyarlılık, devasa hesaplama maliyeti.*
+>
+> *Gu-Kelly-Xiu 2020 (asset pricing ML literatürünün altın standardı)
+> modellerini **yılda sadece bir kez** yeniden eğitir.*
+>
+> *Bryzgalova-Pelger-Zhu (AP-Trees): **20 yıllık training** + 10 yıllık
+> validation pencereleri kullanır.*
+>
+> *Çeyreklik veya yıllık kadanslar, modelin kısa vadeli piyasa
+> gürültüsüne aşırı tepki vererek aşırı uyuma düşmesini engeller."*
 
-#3 en pragmatik: her ay sonu mevcut çeyreğin 902 formülü arasından
-son 30 günde en iyi olanı seç.
+Yani Minerva'nın çeyreklik mining'i literatürle uyumlu. Asıl iki sorun:
+
+**A. Train Window Çok Kısa**
+
+Mevcut durum:
+- Q1 2016 mining'de train = 2012 → 2015 = **~4 yıl**
+- Gu-Kelly-Xiu: **18 yıl** training öneriyor
+- Bryzgalova: **20 yıl** training kullanmış
+
+Minerva'nın elinde max 13.5 yıl (2012-2025) var. Bu yetersizliği kabul
+edip ya:
+- Veriyi 1990'lara kadar geriye götür (BIST için zor — kalite düşer)
+- "Erken çeyreklere şüpheyle yaklaş, ilk 4-5 yıl trading'i atla"
+  diye kabul et
+
+```python
+# Pragmatik düzeltme: ilk 5 yıl trading'i atla
+TRADING_MIN_TRAIN_YEARS = 5
+
+if (train_end - data_start).days / 365 < TRADING_MIN_TRAIN_YEARS:
+    log.warning(f"Train penceresi <5 yıl ({(train_end - data_start).days/365:.1f}) — "
+                f"bu çeyreği atlayıp trade etme.")
+    return 0, None  # mining yapma, trade etme
+```
+
+**B. Expanding Window mu, Fixed Rolling mu?**
+
+Mevcut kod expanding window (`db[Date <= train_end]`). Bu Gu-Kelly-Xiu
+ile uyumlu — eski veri silinmiyor. **Bu zaten doğru tasarlanmış.**
+
+**C. Aylık Champion Rotation (Mining Yapmadan)**
+
+> *"Combinatorial Purged Cross-Validation (CPCV) yönteminin lokal
+> versiyonu: mevcut havuzdan yeni veriyle yeniden seçim yapmak."*
+
+Mining çeyreklik kalsın ama her ay sonu mevcut 902 formülün son 30
+günlük performansını ölçüp top-K'yı güncelle:
+
+```python
+# Aylık champion rotation — mining maliyeti YOK
+if date_t.is_month_end and current_pool:
+    recent_30d = db[db["Date"].between(date_t - 30d, date_t)]
+    pool_with_recent_ic = [(f, compute_ic(f, recent_30d)) for f in current_pool]
+    new_top_k = sorted(pool_with_recent_ic, key=lambda x: x[1], reverse=True)[:K]
+    save_regime_champions(new_top_k)
+```
+
+**Beklenen etki:** Rejim geçişlerinde whipsaw azalır, mining maliyeti
+artmaz.
+
+**D. CPCV Yerine Walk-Forward Kullanımı**
+
+> *"López de Prado: walk-forward veriyi israf eder, tek senaryo test
+> eder, yüksek varyans üretir. **Combinatorial Purged Cross-Validation
+> (CPCV)** yöntemini önerir — veride çok sayıda olası geçmiş/gelecek
+> kombinasyonunu test eder."*
+
+S1 (OOS holdout) çözümünü implement ederken CPCV mantığı kullanılmalı,
+saf walk-forward değil. Bu Tier 1 işin parçası.
 
 ---
 
@@ -401,23 +460,82 @@ if abs(gap_pct) > 0.05:  # %5 gap eşiği
 
 ---
 
-#### S10. RL Agent 10 Yıl Statik
+#### S10. RL Agent 10 Yıl Statik + Composite Reward Eksik
 
 **Sorun:**
 200 episode ile bir kez eğitilmiş PPO, 10 yıl boyunca aynı politika.
-Mode collapse + alpha decay riski.
+Mode collapse + alpha decay riski. Ayrıca pure Sharpe reward — drawdown
+ve cost penalty yok.
 
-**Akademik dayanak (Pippas 2025):**
+**Akademik dayanak — Statik politika riski (Pippas 2025):**
 > *"On-policy algorithms (PPO) become unusable after policy updates...
 > 200 episode is highly insufficient for complex financial environments...
 > The agent will experience mode collapse and stick to a single safe
 > action (e.g., always cash)."*
 
-**Çözüm seçenekleri:**
-1. **Pragmatik:** Çeyreklik retrain (mining ile birlikte, +5 dk maliyet)
-2. **Optimal:** Hierarchical 4-agent RL (Faz 4)
-3. **Şimdi:** RL'yi tamamen kapat (`--no-rl`), sabit leverage=1.0 ile
-   trade et — performans karşılaştır
+**Akademik dayanak — Composite reward shaping (Pippas 2025):**
+
+> *"Ağırlıkların `w_1, w_2, w_3` kalibrasyonu için 3 yöntem:*
+>
+> *1. **End-to-End Learning** (Chan-Shelton): Ağırlıklar ajanın eğitim
+> süreci içinde attention-benzeri mekanizmayla öğrenilir.*
+>
+> *2. **Bayesian Optimization** (Aboussalah-Lee): Expected Improvement
+> ile hiperparametre olarak ayarlanır.*
+>
+> *3. **Ölçek Normalizasyonu — ZORUNLU:** Yüksek gürültülü kâr sinyali
+> ile küçük komisyon sinyali doğrudan toplanamaz. Her ödül z-skor veya
+> vol-adjusted normalize edilmeli."*
+
+**Akademik dayanak — Oracle Sızıntısı Engelleme (Pippas 2025):**
+
+> *"Oracle (perfect foresight) bilgisi RL ajanına nasıl sızıntısız
+> verilir? **Policy Distillation / Teacher-Student framework**:*
+>
+> *- Öğretmen ajan: kusursuz piyasa bilgisiyle eğitilir, optimal
+>   stratejiyi bulur, AKSİYONLARI KAYDEDİLİR.*
+> *- Öğrenci ajan (gerçek RL): sadece geçmiş/kısıtlı veri görür.
+>   Öğretmenle aynı yönde işlem yaptığında **log-loss bazlı ödül/ceza**
+>   alır.*
+> *- Öğrenci ajanın state space'inde HİÇBİR ZAMAN gelecek veri olmaz —
+>   sadece öğretmenin kararlarını taklit etmeye çalışır.*
+> *- Train/test arasına López de Prado **purging + embargo** uygulanır."*
+
+**Çözüm — Önce minimal, sonra optimal:**
+
+```python
+# 1. ÖNCE: composite reward + scale normalization (yarım gün iş)
+def composite_reward(daily_ret, position_change, fees, oracle_action,
+                     current_action, turbulence):
+    # Ölçek normalizasyonu — Pippas zorunluluğu
+    profit_norm = daily_ret / max(np.std(recent_returns), 1e-6)  # z-score
+    cost_norm   = -fees * abs(position_change) / typical_fee_scale
+    # Expert imitation: log-loss (Yu-Wang IL)
+    expert_loss = -np.log(max(1 - abs(current_action - oracle_action), 1e-6))
+
+    # Turbulence emergency exit (Kritzman-Li 2010)
+    if turbulence > turbulence_threshold:
+        return -10.0  # forced cash
+
+    return 0.6 * profit_norm + 0.2 * cost_norm + 0.2 * expert_loss
+
+# 2. SONRA: Bayesian opt ile ağırlıkları kalibre et (Optuna)
+# 3. EN SONRA: çeyreklik retrain + 4-agent hierarchical (Faz 4)
+```
+
+**Oracle leakage uyarısı:**
+Oracle action `oracle_action_t = sign(future_return_{t+1})` ile
+hesaplanır → bu **sadece eğitim sırasında** ajan görsün, **production'da
+asla kullanılmasın**. Train/val arasına **embargo gerekli** (López de
+Prado purging).
+
+**Önceliklendirilmiş çözüm:**
+1. **Pragmatik (1 gün):** Composite reward + scale norm uygula, RL'yi
+   retrain et
+2. **Orta (3-5 gün):** Çeyreklik retrain hook + Oracle teacher-student
+3. **Optimal:** Hierarchical 4-agent RL (Faz 4)
+4. **Şimdi (5 dk):** `--no-rl` ile sabit leverage=1.0 test et,
+   RL'nin gerçek katkısını ölç
 
 ---
 
@@ -597,17 +715,19 @@ DUCKDB_FALLBACK_COUNTER.inc()
 
 ## Bölüm 5: AKADEMİK REFERANS HARİTASI
 
-| Sorun | Birincil Kaynak | NotebookLM Source ID | Durum |
-|---|---|---|---|
-| S1 (OOS holdout) | López de Prado AFML Ch. 11-12 | `7e39d9b0` | ✅ Cevaplandı |
-| S2 (PBO entegrasyon) | Bailey, Borwein, Lopez de Prado, Zhu 2015 | `3e8cdcbc` | ✅ Cevaplandı |
-| S3 (Beta hedge) | López de Prado ETF Trick (AFML §2.4) | `7e39d9b0` | ✅ Cevaplandı |
-| S5 (Survivorship) | Brown-Goetzmann-Ross 1992 | `9bad604a` + `59debe4c` | ✅ Cevaplandı |
-| S6 (Slippage) | Cont-Kukanov-Stoikov 2014 | `c76a4c51` | ✅ Cevaplandı |
-| S8 (Adversarial reverse) | Minerva v4 Plan + Bailey 2015 | `b75acabe` | ✅ Cevaplandı |
-| S10 (RL retrain) | Pippas et al. 2025 (RL Survey) | `20eaf594` | ✅ Cevaplandı |
-| S11 (Rejim koşullu) | Hamilton 1989 + Ang-Bekaert 2002 | `0fb9f1ad` + `a49587e2` | ✅ Cevaplandı |
-| S12 (Turbulence) | Kritzman-Li 2010 | `db2302b2` | ✅ Cevaplandı |
+| Sorun | Birincil Kaynak | Durum |
+|---|---|---|
+| S1 (OOS holdout) | López de Prado AFML Ch. 11-12 | ✅ Cevaplandı |
+| S2 (PBO entegrasyon) | Bailey, Borwein, López de Prado, Zhu 2015 | ✅ Cevaplandı |
+| S3 (Beta hedge) | López de Prado ETF Trick (AFML §2.4) | ✅ Cevaplandı |
+| S5 (Survivorship) | Brown-Goetzmann-Ross 1992 | ✅ Cevaplandı |
+| S6 (Slippage) | Cont-Kukanov-Stoikov 2014 | ✅ Cevaplandı |
+| S7 (Cadence) | Gu-Kelly-Xiu 2020, Bryzgalova-Pelger-Zhu, López de Prado CPCV | ✅ Cevaplandı |
+| S8 (Adversarial reverse) | Minerva v4 Plan + Bailey 2015 | ✅ Cevaplandı |
+| S10 (RL composite reward + Oracle) | Pippas 2025, Chan-Shelton, Aboussalah-Lee, Yu-Wang IL | ✅ Cevaplandı |
+| S11 (Rejim koşullu) | Hamilton 1989 + Ang-Bekaert 2002 | ✅ Cevaplandı |
+| S12 (Turbulence) | Kritzman-Li 2010 | ✅ Cevaplandı |
+| S3.alt (BIST short selling) | SPK Tebliği V-101.1 | ⏸️ Kullanıcı tarafından ertelendi |
 
 ---
 
@@ -660,28 +780,21 @@ Notebook: `Minerva v3` (962f7299-b163-4b62-8c49-492eaae085e6)
    momentum process, bull/bear ayrımı
 9. Kritzman-Li 2010 turbulence → Mahalanobis distance, quintile inverse exposure
 
-**❌ Cevap alınamayan sorgular (timeout — daha fazla kaynak eklenebilir):**
+**✅ Sonradan cevaplanan sorgular (kullanıcı + ek kaynak):**
 
-1. **Pippas 2025 Composite Reward Shaping detayları**
-   - `0.6*profit + 0.2*cost + 0.2*expert_imitation` formülünün
-     ağırlık kalibrasyonu nasıl yapılmalı?
-   - Oracle action (perfect foresight) reward'a leakage olmadan
-     nasıl katılır?
-   - **Önerilen kaynak:** Lee et al. MAPS framework paper
+10. **Composite Reward Shaping (S10):** Chan-Shelton end-to-end learning,
+    Aboussalah-Lee Bayesian optimization, scale normalization ZORUNLU
+    (z-score), Yu-Wang IL log-loss penalty, López de Prado purging+embargo
 
-2. **Walk-forward mining cadence: aylık vs çeyreklik**
-   - Rolling window genişliği akademik öneri ne?
-   - Hangi sıklıkta retrain optimal?
-   - **Önerilen kaynak:** Bailey-Lopez de Prado "Sharpe Ratio Efficient
-     Frontier" (2012), AFML Ch. 17 backtesting on rolling windows
+11. **Mining Cadence (S7):** Gu-Kelly-Xiu 2020 yıllık retrain + 18 yıl
+    training, Bryzgalova-Pelger-Zhu 20 yıl, López de Prado CPCV walk-forward
+    yerine. **Sonuç:** Çeyreklik mining literatürle uyumlu; asıl sorun
+    train window genişliği (Minerva 4 yıl, literatür 18-20 yıl).
 
-3. **BIST açığa satış (short selling) SPK regülasyonu**
-   - Hangi hisseler short edilebilir?
-   - Pay senedi ödünç verme (securities lending) maliyetleri?
-   - Long-short market-neutral strateji pratik kısıtlar?
-   - **Önerilen kaynak:** SPK Sermaye Piyasası Kurulu Tebliği
-     (Açığa Satış İşlemleri Hakkında Tebliğ V-101.1), Borsa İstanbul
-     Pay Ödünç Piyasası dökümanı
+**⏸️ Ertelendi (kullanıcı kararı):**
+
+12. **BIST açığa satış (short selling) SPK regülasyonu** — Şu an için
+    karara gerek yok, long-only + VİOP hedge yaklaşımıyla devam edilecek.
 
 ### Ek C: Mevcut Kod Eşlemesi
 
