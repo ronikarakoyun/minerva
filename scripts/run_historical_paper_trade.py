@@ -231,6 +231,7 @@ def run_quarterly_mining(
     meta_model: "MetaModel | None" = None,
     n_workers: int = 1,
     n_trials: int = 4,
+    min_train_years: int = 5,
 ) -> tuple[int, "MetaModel | None"]:
     """Bir çeyrek için MCTS+DML mining çalıştır, meta-veto uygula, şampiyon ata.
 
@@ -243,6 +244,8 @@ def run_quarterly_mining(
     Parameters
     ----------
     meta_model : Önceki çeyrekten gelen MetaModel (ilk çeyrekte None).
+    min_train_years : Minimum eğitim penceresi (yıl). Pre-trading mining için 3
+        kullanılır; quarterly mining için default 5 (Gu-Kelly-Xiu 2020).
 
     Returns
     -------
@@ -256,14 +259,14 @@ def run_quarterly_mining(
     # ── S7: Minimum Train Years Guard ────────────────────────────────────
     # Gu-Kelly-Xiu (2020) varlık fiyatlama literatürü: ≥5 yıl zorunlu.
     # Kısa pencerede mining IS'de ezberler, OOS'da çöker.
-    _TRADING_MIN_TRAIN_YEARS = 5
+    # Pre-trading mining (2012-2015 = 4 yıl) için min_train_years=3 geçilir.
     _data_start = db["Date"].min()
     _train_years = (train_end - _data_start).days / 365.0
-    if _train_years < _TRADING_MIN_TRAIN_YEARS:
+    if _train_years < min_train_years:
         log.warning(
             "S7: Train penceresi < %d yıl (%.1f yıl) — "
             "overfit riski yüksek, çeyrek mining atlanıyor.",
-            _TRADING_MIN_TRAIN_YEARS, _train_years,
+            min_train_years, _train_years,
         )
         return 0, None, []
 
@@ -789,6 +792,7 @@ def run_walk_forward(
             meta_model=None,          # ilk mining → meta-model yok
             n_workers=n_workers,
             n_trials=n_trials,
+            min_train_years=3,        # Pre-trading: 2012-2015 = 4 yıl yeterli
         )
         fracdiff_quarter_counter += 1
     elif pre_snapshot.exists():
