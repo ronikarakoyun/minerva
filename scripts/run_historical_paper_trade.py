@@ -246,7 +246,8 @@ def run_quarterly_mining(
 
     Returns
     -------
-    (champion_count, new_meta_model)
+    (champion_count, new_meta_model, sorted_res)
+        sorted_res: bu çeyreğin tüm formül havuzu (S7-C aylık rotation için).
     """
     log.info("Mining başlıyor: train_end=%s  ckpt=%s  workers=%d",
              train_end.date(), checkpoint_id, n_workers)
@@ -264,7 +265,7 @@ def run_quarterly_mining(
             "overfit riski yüksek, çeyrek mining atlanıyor.",
             _TRADING_MIN_TRAIN_YEARS, _train_years,
         )
-        return 0, None
+        return 0, None, []
 
     t0 = time.time()
 
@@ -301,7 +302,7 @@ def run_quarterly_mining(
 
     if not results:
         log.warning("Mining sonucu boş — şampiyon atanamadı.")
-        return 0, None
+        return 0, None, []
 
     # ── Meta-Labeling Veto (PR-9) ───────────────────────────────────────
     # Önceki çeyrekten gelen meta_model varsa düşük güven formülleri çıkar.
@@ -403,7 +404,7 @@ def run_quarterly_mining(
                         "S2 PBO=%.3f ≥ 0.5: CSCV overfit testi başarısız — "
                         "çeyrek mining reddediliyor!", _pbo_val
                     )
-                    return 0, None
+                    return 0, None, []
                 elif np.isfinite(_pbo_val) and _pbo_val >= 0.05:
                     log.info(
                         "S2 PBO caution zone (%.3f): çeyrek devam ediyor. "
@@ -437,7 +438,7 @@ def run_quarterly_mining(
         records = json.load(f)
     snapshot_path = save_catalog_snapshot(records, train_end.year, quarter_of(train_end))
     log.info("Çeyrek snapshot: %s", snapshot_path.relative_to(ROOT_DIR))
-    return len(top_k), new_meta_model
+    return len(top_k), new_meta_model, sorted_res
 
 
 def _compute_recent_ic(
@@ -762,6 +763,9 @@ def run_walk_forward(
     log.info("MiningConfig — DML=%s  attention=%s  dropout=%.2f  search=%s",
              mining_cfg.use_dml_neutralize, mining_cfg.use_attention,
              mining_cfg.dropout_p, mining_cfg.search_mode)
+    log.info("S7-D CPCV: wf_purge=%d, wf_embargo=%d, wf_n_folds=%d — "
+             "Purged K-Fold (López de Prado CPCV-style) aktif.",
+             mining_cfg.wf_purge, mining_cfg.wf_embargo, mining_cfg.wf_n_folds)
 
     # FracDiff cache yolu
     fracdiff_cache_path = ROOT_DIR / "data" / "fracdiff_d.json"
@@ -769,6 +773,8 @@ def run_walk_forward(
 
     # MetaModel: çeyrekten çeyreğe aktarılır (ilk çeyrekte None)
     current_meta_model: "MetaModel | None" = None
+    # S7-C: Aylık rotation için mevcut çeyrek formül havuzu
+    current_pool: list = []
 
     pre_year, pre_q = warmup_end.year, quarter_of(warmup_end)
     pre_snapshot = HIST_CATALOG_DIR / f"{pre_year}_Q{pre_q}.json"
@@ -776,7 +782,7 @@ def run_walk_forward(
         log.info("=" * 60)
         log.info("PRE-TRADING MINING (Q1 2016 boşluğu için)")
         log.info("=" * 60)
-        _cnt, current_meta_model = run_quarterly_mining(
+        _cnt, current_meta_model, current_pool = run_quarterly_mining(
             db, warmup_end, alpha_cfg, mining_cfg,
             n_regimes=hmm._best_K,
             checkpoint_id=f"hist_q_{pre_year}_{pre_q}",
@@ -794,7 +800,8 @@ def run_walk_forward(
         output_path=PAPER_TRADES_PATH,
         portfolio_capital_TL=INITIAL_CAPITAL,
     )
-    slip_cfg = SlippageConfig(use_dynamic_slippage=False)  # tarihsel basit; dynamic çok yavaş
+    # S6: CKS 2014 slipaj — illiquid fallback 60 bps (BIST varsayılanı)
+    slip_cfg = SlippageConfig(use_dynamic_slippage=False, fallback_bps=60.0)
 
     equity_history: list[float] = [INITIAL_CAPITAL]
     leverage_history: list[float] = []
@@ -843,7 +850,7 @@ def run_walk_forward(
                     except Exception as exc:
                         log.warning("FracDiff refresh başarısız: %s", exc)
                 # ── Çeyreklik Mining (Meta-Veto dahil) ───────────────────
-                _cnt, current_meta_model = run_quarterly_mining(
+                _cnt, current_meta_model, current_pool = run_quarterly_mining(
                     db, date_t, alpha_cfg, mining_cfg,
                     n_regimes=hmm._best_K,
                     checkpoint_id=f"hist_q_{year}_{q}",
@@ -853,6 +860,36 @@ def run_walk_forward(
                 )
                 n_mining_runs += 1
 
+                # S10: RL çeyreklik retrain
+                # Birikmiş equity history ile ajanı her çeyrekte güncelle.
+                # Mode collapse riskini azaltır (Pippas 2025).
+                if use_rl and rl_agent is not None and len(equity_history) >= 30:
+                    try:
+                        eq_series = pd.Series(
+                            equity_history,
+                            index=pd.date_range(end=date_t, periods=len(equity_history), freq="B"),
+                        )
+                        rl_agent_new = train_rl_sizer(
+                            equity_curve=eq_series,
+                            n_episodes=50,   # hızlı güncelleme; tam eğitim değil (200 ep)
+                            save_path=None,  # sadece bellekte güncelle
+                        )
+                        # State dict'i kopyala (update değil hard reset önlemek için)
+                        import copy
+                        rl_agent.load_state_dict(copy.deepcopy(rl_agent_new.state_dict()))
+                        log.info("S10 RL retrain tamamlandı: %d episode, equity_len=%d",
+                                 50, len(equity_history))
+                    except Exception as exc:
+                        log.warning("S10 RL retrain başarısız: %s", exc)
+
+                # S14: Çeyreklik sayaç raporu
+                try:
+                    from engine.monitoring.counters import COUNTERS
+                    COUNTERS.report(f"Q{q} {year}")
+                    COUNTERS.reset()
+                except ImportError:
+                    pass
+
         # B. Cuma → HMM refit (refitter._should_refit otomatik 7 günde bir)
         if date_t.weekday() == 4:
             try:
@@ -861,6 +898,37 @@ def run_walk_forward(
                 n_hmm_refits += 1
             except Exception as exc:
                 log.warning("HMM refit başarısız %s: %s", date_t.date(), exc)
+
+        # B2. S7-C: Aylık champion rotation — mevcut havuzdan son 30g IC ile yeniden sıralama
+        _is_month_end = (i + 1 < len(trading_dates) and
+                         trading_dates[i + 1].month != date_t.month)
+        if _is_month_end and current_pool and not is_quarter_end_business_day(date_t, db_dates):
+            # Çeyrek-sonu zaten mining yaptı → month-end rotation sadece ara aylarda
+            _rotation_start = date_t - pd.Timedelta(days=45)
+            _recent_df = db[(db["Date"] > _rotation_start) & (db["Date"] <= date_t)].copy()
+            if len(_recent_df) >= 20 and "Next_Ret" in _recent_df.columns:
+                _pool_ic = []
+                for _mr in current_pool:
+                    _ric = _eval_holdout_ric(_mr, _recent_df, alpha_cfg)
+                    _pool_ic.append((_mr, float(_ric) if np.isfinite(_ric) else -1e9))
+                _pool_ic.sort(key=lambda x: x[1], reverse=True)
+                _new_top = _pool_ic[:max(hmm._best_K, 1)]
+
+                # Kataloğu yenile
+                _cat_path = ROOT_DIR / CATALOG_PATH
+                if _cat_path.exists():
+                    _cat_path.unlink()
+                for _regime_id, (_mr, _ic) in enumerate(_new_top):
+                    save_regime_champion(
+                        regime_id=_regime_id,
+                        formula=_mr.formula,
+                        tree=_mr.tree,
+                        ic=float(_mr.mean_ric),
+                        rank_ic=float(_mr.mean_ric),
+                        adj_ic=float(_mr.mean_ric),
+                    )
+                log.info("S7-C Monthly rotation: %d champion güncellendi [%s, pool_size=%d]",
+                         len(_new_top), date_t.date(), len(current_pool))
 
         # C. Bugünün regime probabilities (ARCH-4: önbellekten, O(1))
         prob_row = get_prob_row(hmm, date_t)

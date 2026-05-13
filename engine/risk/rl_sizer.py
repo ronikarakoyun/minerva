@@ -80,6 +80,7 @@ class SizingEnv:
         self._t: int = 0
         self._current_scale: float = 1.0
         self._peak: float = 1.0
+        self._prev_scale: float = 1.0
 
     def reset(self) -> np.ndarray:
         """Episode başında rastgele bir (equity, regime, vol) üçlüsü seç."""
@@ -87,6 +88,7 @@ class SizingEnv:
         self._t = 0
         self._current_scale = 1.0
         self._peak = float(self._eq.iloc[0]) if len(self._eq) > 0 else 1.0
+        self._prev_scale = 1.0
         return self._observe()
 
     def step(self, action: int) -> tuple[np.ndarray, float, bool, dict]:
@@ -112,14 +114,28 @@ class SizingEnv:
         recent = eq_vals[max(0, self._t - window): self._t]
         rets_recent = np.diff(recent) / np.maximum(recent[:-1], 1e-10)
         std = float(np.std(rets_recent)) if len(rets_recent) > 1 else 1e-6
-        reward = r_t / max(std, 1e-6)
 
-        # Drawdown cezası: yüksek kaldıraç + derin drawdown kombinasyonunu cezalandır.
-        # scale > 1.0 iken drawdown > %10 ise ceza uygulanır → mode collapse önleme.
+        # S10 Composite reward (Pippas 2025):
+        # 1. Profit norm: z-score (ölçek normalizasyonu — ZORUNLU)
+        profit_norm = r_t / max(std, 1e-6)
+
+        # 2. Transaction cost norm: pozisyon değişimi cezası
+        #    scale değişimi → turnover proxy → komisyon maliyeti
+        _prev_scale = getattr(self, '_prev_scale', scale)
+        position_change = abs(scale - _prev_scale)
+        self._prev_scale = scale
+        # BIST tipik komisyon ~0.1% = 10 bps; ölçek [0.5,2.0] → normalize
+        cost_norm = -0.3 * position_change  # max değişim=1.5 → max ceza=-0.45
+
+        # 3. Drawdown cezası (mevcut, korunuyor)
         peak = self._peak if self._peak > 1e-10 else 1.0
         current_dd = max(0.0, 1.0 - float(eq_vals[self._t]) / peak)
+        drawdown_penalty = 0.0
         if scale > 1.0 and current_dd > 0.10:
-            reward -= 2.0 * (scale - 1.0) * current_dd
+            drawdown_penalty = -2.0 * (scale - 1.0) * current_dd
+
+        # Composite: 0.7 profit + 0.2 cost + 0.1 drawdown
+        reward = 0.7 * profit_norm + 0.2 * cost_norm + drawdown_penalty
 
         reward = float(np.clip(reward, -10.0, 10.0))
 

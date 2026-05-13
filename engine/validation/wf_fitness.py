@@ -233,6 +233,11 @@ def compute_wf_fitness(
         try:
             sig = neutralize_signal(sig, idx, factors=factor_cache, use_dml=use_dml)
         except Exception:
+            try:
+                from engine.monitoring.counters import COUNTERS
+                COUNTERS.inc("dml_failure")
+            except ImportError:
+                pass
             pass  # nötralizasyon başarısızsa ham sinyale devam et
 
     # Signal + hedef + Date tablosu
@@ -290,7 +295,11 @@ def compute_wf_fitness(
                     fold_rics.append(float(fric))
                 continue
             except Exception:
-                pass  # DuckDB hatası → pandas fallback
+                try:
+                    from engine.monitoring.counters import COUNTERS
+                    COUNTERS.inc("duckdb_fallback")
+                except ImportError:
+                    pass
         mask = tmp["Date"].isin(fold_dates)
         sub = tmp[mask]
         if len(sub) < 20:        # küçük fold'u atla
