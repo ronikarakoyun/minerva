@@ -255,8 +255,11 @@ def compute_wf_fitness(
         return result
 
     def _ic_on_group(g: pd.DataFrame, method: str) -> float:
+        # std=0 (sabit sinyal) → IC tanımsız. 0.0 yerine NaN dönülmeli ki
+        # groupby.apply().mean() bu günü ortalamadan dışlasın (skipna=True default).
+        # 0.0 dönmek mean'i sıfıra çekerek min_mean_ric filtresini hatalı tetikler.
         if g["Signal"].std() == 0:
-            return 0.0
+            return float("nan")
         return g["Signal"].corr(g["Target"], method=method)
 
     # Faz 1.2: DuckDB-vektörize IC hesabı (10-30× hızlanma)
