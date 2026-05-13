@@ -130,7 +130,8 @@ def _pandas_fallback(tmp_df: pd.DataFrame, method: str) -> float:
     try:
         ics = tmp_df.groupby("Date").apply(
             lambda g: g["Signal"].corr(g["Target"], method=method)
-            if g["Signal"].std() > 0 else 0.0
+            if g["Signal"].std() > 0 else 0.0,
+            include_groups=False,
         )
         ic = ics.dropna().mean()
         return float(ic) if not np.isnan(ic) else 0.0
