@@ -256,8 +256,12 @@ def run_quarterly_mining(
     # ── Bir sonraki çeyrek için MetaModel eğit ─────────────────────────
     new_meta_model = build_meta_model_for_quarter(results)
 
-    # ── Top-K formül seç (mean_ric'e göre azalan) ─────────────────────
-    sorted_res = sorted(results, key=lambda r: r.mean_ric, reverse=True)
+    # ── Top-K formül seç (FITNESS'a göre azalan) ─────────────────────
+    # KRİTİK: mean_ric DEĞİL fitness kullan!
+    #   fitness = mean_ric - 2.0*std_ric - 0.003*complexity - size_penalty
+    # mean_ric ile sıralarsak tek-fold şanslı (lucky outlier) formüller seçilir
+    # → out-of-sample çakılır. fitness istikrar cezası ile bu sorunu çözer.
+    sorted_res = sorted(results, key=lambda r: r.fitness, reverse=True)
     top_k = sorted_res[:max(n_regimes, 1)]
 
     # Mevcut alpha_catalog.json'u temizle (yeni çeyrek başlangıcı)
