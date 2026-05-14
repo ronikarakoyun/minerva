@@ -54,7 +54,7 @@ class MiningConfig:
     neutralize: bool = True
     target_col: str = "Next_Ret"
     seed: int = 42
-    min_mean_ric: float = 0.003   # Kabul eşiği
+    min_mean_ric: float = 0.008   # Kabul eşiği — gürültü tabanı (0.003 Ptyp gibi trivial özellikleri geçiriyordu)
     min_pos_ratio: float = 0.4
     min_valid_folds: int = 2      # 3 → 2: fold geçerlilik eşiği (gevşetildi)
     # DSR gating — True ise top-100 havuzu DSR testi ile filtreler

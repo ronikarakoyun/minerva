@@ -157,7 +157,7 @@ def compute_wf_fitness(
     evaluate_fn,                     # cfg.evaluate gibi (tree, idx) -> Series
     idx: pd.DataFrame,               # MultiIndex (Ticker, Date) + hedef kolonu
     folds: "list[np.ndarray] | list[dict]",
-    lambda_std: float = 2.0,
+    lambda_std: float = 0.74,        # FIX: 2.0→0.74 — t-stat 5-fold %95 güven (1.645/√5)
     lambda_cx: float = 0.003,
     min_valid_folds: int = 3,
     target_col: str = "Next_Ret",    # "Next_Ret" veya "TB_Label"
@@ -340,6 +340,10 @@ def compute_wf_fitness(
             size_penalty = lambda_size * max(0.0, abs(size_corr) - 0.3)
 
     # Fitness — stabilite-cezalı + karmaşıklık-cezalı + size-cezalı
+    # lambda_std=0.74 → 5-fold CPCV için t-stat tek-yönlü %95 güven (1.645/√5).
+    # Eski 2.0 değeri ~%99.5+ güven gerektiriyordu → gerçek alfa formülleri eliyordu.
+    # (min_mean_ric filtresi mining_runner.py post-filter'da uygulanır; burada
+    #  sadece düşük fitness ile aşağı sıralanır.)
     fitness = mean_ric - lambda_std * std_ric - lambda_cx * complexity - size_penalty
 
     result.update({
