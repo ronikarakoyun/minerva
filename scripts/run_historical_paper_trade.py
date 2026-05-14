@@ -969,6 +969,11 @@ def run_walk_forward(
             continue
         today_weights = weights_df.loc[date_t].dropna()
         today_weights = today_weights[today_weights > 0]
+        # Aynı ticker birden fazla formula'dan gelebilir → deduplicate (sum weights)
+        today_weights = today_weights.groupby(level=0).sum()
+        # Toplam ağırlığı 1.0'a normalize et (leverage cap)
+        if today_weights.sum() > 1.0:
+            today_weights = today_weights / today_weights.sum()
         if len(today_weights) == 0:
             continue
 

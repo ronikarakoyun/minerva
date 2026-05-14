@@ -208,7 +208,7 @@ class PaperTraderConfig:
     log_time: str = "09:45"                  # cron çağrı saati
     min_sharpe_for_promotion: float = 1.0    # paper → live eşiği
     paper_window_days: int = 60              # min "out-of-sample" süre
-    hold_days: int = 2                       # exit_px = Pclose_{t+hold_days}
+    hold_days: int = 21                      # exit_px = Pclose_{t+hold_days} — aylık rotation ile eşleşir
     portfolio_capital_TL: float = 1_000_000  # paper portföy büyüklüğü
 
 
