@@ -780,7 +780,7 @@ def run_walk_forward(
         # Filter gevşetme — backtest amaçlı daha fazla formül kabulü
         # (CSCV/PBO sertifikasyonu sonradan dış denetimle yapılacak)
         size_corr_hard_limit=0.85,     # 0.7 → 0.85 — büyük cap yönelimini biraz tolere et
-        min_mean_ric=0.001,            # 0.003 → 0.001 — daha düşük IC kabul et
+        min_mean_ric=0.008,            # C2 fix: gürültü tabanı (Ptyp RIC=0.003 elenmeli)
         min_pos_ratio=0.3,             # 0.4 → 0.3 — %30 fold pozitif yeterli
     )
     log.info("MiningConfig — DML=%s  attention=%s  dropout=%.2f  search=%s",
