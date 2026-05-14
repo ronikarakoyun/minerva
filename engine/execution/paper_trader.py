@@ -395,7 +395,7 @@ def manage_portfolio_and_log(
         existing["date"] = pd.to_datetime(existing["date"])
         pending_mask = existing["exit_px"].isna()
         n_dates = len(px_pivot.index)
-        commission_pct = float(os.getenv("COMMISSION_PCT", "0.0030"))
+        commission_pct = float(os.getenv("COMMISSION_PCT", "0.0010"))
         for i in existing.index[pending_mask]:
             row_date = existing.at[i, "date"]
             ticker   = existing.at[i, "ticker"]
@@ -495,7 +495,7 @@ def compute_realized_pnl(
         gross = gross_raw
         slip_pct = df.at[i, "slippage_bps"] / 1e4
         # Komisyon: BIST damga vergisi %0.1 + aracı %0.05 = %0.15 (giriş + çıkış = %0.30)
-        commission_pct = float(os.getenv("COMMISSION_PCT", "0.0030"))
+        commission_pct = float(os.getenv("COMMISSION_PCT", "0.0010"))
 
         df.at[i, "exit_px"] = exit_px
         df.at[i, "gross_pnl_pct"] = gross
