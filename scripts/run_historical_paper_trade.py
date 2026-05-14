@@ -416,7 +416,27 @@ def run_quarterly_mining(
             except Exception as _pbo_exc:
                 log.debug("S2 PBO hesaplama hatası: %s", _pbo_exc)
 
-    top_k = sorted_res[:max(n_regimes, 1)]
+    # Diverse top-K seçimi: aynı formülü tekrar etme (rejim-blend için çeşitlilik şart).
+    # Mining çoğunlukla aynı top-formülü farklı path'lerle defalarca buluyor;
+    # naif sorted_res[:K] tüm rejimlere AYNI champion atıyordu.
+    _seen_formulas = set()
+    _unique_top = []
+    for _mr in sorted_res:
+        if _mr.formula in _seen_formulas:
+            continue
+        _seen_formulas.add(_mr.formula)
+        _unique_top.append(_mr)
+        if len(_unique_top) >= max(n_regimes, 1):
+            break
+    n_target = max(n_regimes, 1)
+    if len(_unique_top) < n_target:
+        log.warning("Diverse top-K: sadece %d unique formül bulundu (n_regimes=%d). "
+                    "Eksik rejimler cycle ile dolduruluyor.",
+                    len(_unique_top), n_target)
+        # Cycle: A,B → A,B,A,B (4 rejim için)
+        top_k = [_unique_top[i % len(_unique_top)] for i in range(n_target)]
+    else:
+        top_k = _unique_top
 
     # Mevcut alpha_catalog.json'u temizle (yeni çeyrek başlangıcı)
     catalog_path = ROOT_DIR / CATALOG_PATH
