@@ -462,13 +462,213 @@ NotebookLM'de bunlardan eksik olanlar varsa eklenmesi v12 dokümanasyonunu güç
 
 ---
 
-## 10. Sonuç ve Sonraki Adımlar
+## 10. Veri Dışı Getiri Artırıcılar
+
+Veri zenginleştirme tek lever değil. Mevcut mimarinin **strategy/execution/sizing** katmanlarında da 8-10 ek alfa kaynağı var. Bu bölüm onları sıralar; v13+ marathon'larda devreye alınacak.
+
+### 10.1 Tier 1 — Yüksek Etki (+5-15% CAGR)
+
+#### 10.1.1 Long/Short (Equity Market Neutral)
+
+**Sorun:** Mevcut sistem **long-only**. Alfa formülü hem yükseliş hem düşüş tahmin eder ama yarısını kullanıyoruz.
+
+**Çözüm:** Cross-sectional ranking'te:
+- **Long:** signal rank top %20
+- **Short:** signal rank bottom %20 (VIOP individual stock futures veya XU100 endeks)
+- **Neutral:** ortadaki %60 pas
+
+**BIST sınırlamaları:**
+- VIOP'ta sadece **liquid 100 hisse** futures var
+- Ortalama BIST hissesini tek tek shortlamak imkansız → **endeks short** (XU100 future) ile market-neutral yapılabilir
+
+**Beklenen etki:** Alfa **2×**, Sharpe 0.6 → 1.2-1.5.
+
+#### 10.1.2 VIOP Beta Hedging — Saf Alfa
+
+**Mevcut:** Portföy beta'sı ~1.0 (XU100 ile aynı yönde hareket).
+
+**Önerilen:** XU100 vadeli (VIOP F_XU100) short pozisyon ile beta'yı 0'a indir:
+```
+hedge_size_TL = portfolio_value × portfolio_beta × XU100_future_multiplier
+```
+
+**Etki:**
+- CAGR aynı kalabilir, **volatilite yarıya iner**
+- Sharpe 0.6 → 1.5-2.0
+- 2018 kur krizi (-%20) gibi market şokları nötralize edilir
+
+**Uygulama maliyeti düşük:**
+- Sadece XU100 futures fiyat verisi gerekli (yfinance: `F_XU100.IS` veya finnet API)
+- Mevcut paper_trader'a ek bir "hedge_position" kolonu yeter
+
+#### 10.1.3 Multi-Frequency Mining — Birden Fazla Zaman Ölçeği
+
+**Mevcut:** Aylık rebalance (hold_days=21). Tek frekans, sinyal kalitesi bu zaman ölçeğine bağımlı.
+
+**Önerilen 3 katmanlı ensemble:**
+- **Aylık layer** (mevcut): Value/fundamental sinyaller — yavaş döner
+- **Haftalık layer** (yeni): Momentum/teknik — orta hız
+- **Günlük layer** (yeni): Mean-reversion, event-driven — hızlı
+
+Üç katmanın sinyalleri ağırlıklı birleşir. **Akademik kanıt:** Moskowitz-Ooi-Pedersen 2012 "Time Series Momentum" — farklı frekansların alfaları zayıf-korelasyon, ensemble eder.
+
+**Etki:** Sharpe **1.5-2× artar** (uncorrelated alpha sources additive).
+
+**Uygulama maliyeti yüksek:** 3× mining süresi, kompleks blender mimarisi.
+
+---
+
+### 10.2 Tier 2 — Orta Etki (+2-5% CAGR)
+
+#### 10.2.1 Fractional Kelly Position Sizing
+
+**Mevcut:** Equal Risk Contribution (ERC) — her pozisyon aynı risk katkısı.
+
+**Sorun:** Top-conviction sinyal (RIC=0.05) ile zayıf sinyal (RIC=0.01) aynı ağırlığı alıyor.
+
+**Kelly formülü:**
+```
+optimal_weight = (expected_return / variance) × (1 / max_drawdown_tolerance)
+```
+
+**Quarter Kelly** (Kelly/4) tipik kullanım — full Kelly çok agresif. Conviction-weighted sizing.
+
+**Etki:** CAGR +3-5%, MDD biraz artar.
+
+**Geliştirme süresi:** 1-2 gün, mevcut ERC ile yan yana koş, A/B karşılaştır.
+
+#### 10.2.2 ATR-Based Stop-Loss / Take-Profit
+
+**Mevcut:** Sabit hold_days=21 — pozisyon iyi/kötü olsun 21 gün tutulur.
+
+**Önerilen — Dinamik trailing stop:**
+```python
+trailing_stop = max(trailing_stop, current_px - 2 × ATR(20))
+take_profit  = entry_px + 4 × ATR(20)   # 2:1 R:R
+```
+
+**Etki:**
+- Kötü trade erken kes → MDD %10-15 azalır
+- İyi trade trail et → kazanan yüzdesi artar
+- BIST 2018 kur krizinde -%20 yerine -%8'de çıkış mümkün
+
+**Geliştirme süresi:** 1-2 gün, paper_trader içinde exit logic.
+
+#### 10.2.3 Sector Rotation Overlay
+
+**Mevcut:** Sektör bilgisi mining'de yok (v12 data planı bunu çözer).
+
+**Eklenirse iki katmanlı strateji:**
+- **Macro layer:** Hangi sektör outperform edecek? (sektör momentum, makro overlay)
+- **Micro layer:** O sektör içinde hangi hisse? (mevcut MCTS)
+
+**Akademik kanıt:** Cohen & Polk 2009 — sektör momentum + within-sector pick güçlü kombinasyon (Sharpe ~+0.3).
+
+**Geliştirme süresi:** 3-5 gün (v12 sonrası, sektör data hazır olunca).
+
+---
+
+### 10.3 Tier 3 — Mimari İyileştirmeler
+
+#### 10.3.1 Hierarchical Risk Parity (HRP)
+
+**Mevcut:** ERC korelasyon-aware değil — her pozisyona eşit risk dağıtır, korelasyonlu pozisyonlar overweight olabilir.
+
+**HRP (López de Prado 2016):** Korelasyon kümelerini hiyerarşik kümeleyerek dağıtım yapar.
+
+**Etki:** Drawdown %10-20 azalır, Sharpe biraz artar.
+
+**Geliştirme süresi:** 1-2 gün (mevcut `engine/risk/portfolio_allocator.py` genişletilir).
+
+#### 10.3.2 Walk-Forward Hyperparameter Tuning
+
+**Mevcut:** `min_mean_ric=0.008`, `λ_std=0.74`, `hold_days=21` — hardcoded sabitler.
+
+**Önerilen:** Her quarter'da bu parametreler bir önceki **2 yıl OOS** üzerinde Optuna ile optimize edilir.
+
+**Etki:** Adaptive sistem — 2018 kur krizi gibi rejim değişimlerinde parametreler otomatik adapt eder.
+
+**Geliştirme süresi:** 2-3 gün (Optuna pipeline + walk-forward CV).
+
+#### 10.3.3 Meta-Learning — Formula × Regime Performance
+
+**Mevcut:** HMM rejimi belirler, mining her rejime top-K şampiyon atar. Atama sezgisel.
+
+**Önerilen:** "Hangi rejimde hangi formül tarihsel olarak iyi çalıştı?" matrisi öğrenilir. Meta-model (LogisticRegression veya GBM) rejim → formül eşlemesi yapar.
+
+**Etki:** +%2-4 CAGR.
+
+**Geliştirme süresi:** 5-7 gün.
+
+#### 10.3.4 RL'i Sisteme Yay (Online Learning)
+
+**Mevcut:** RL sadece kaldıraç (leverage 0.5×-1.0×) için. Formül seçimi statik.
+
+**Önerilen:** RL agent şunları da öğrensin:
+- Formül seçimi ağırlığı (top-K içinde dinamik dağılım)
+- Stop-loss eşiği (volatilite rejimine göre)
+- Sektör tilt (overweight/underweight)
+
+**Etki:** Marjinal ama uzun vadede otomatik adaptasyon.
+
+---
+
+### 10.4 Etki-Maliyet Matrisi
+
+| # | Öneri | CAGR Artışı | Geliştirme | Risk | Akademik kanıt |
+|---|---|---|---|---|---|
+| 10.1.1 | Long/Short | +5-10% | 3-5 gün | Orta | Fama-French long-short faktörler |
+| 10.1.2 | **VIOP Beta Hedge** | Sharpe 2× | **2-3 gün** | **Düşük** | Treynor-Black 1973 |
+| 10.1.3 | Multi-frequency | +3-7% | 4-7 gün | Düşük | Moskowitz et al. 2012 |
+| 10.2.1 | Kelly Sizing | +3-5% | 1-2 gün | Düşük | Kelly 1956, Thorp 1969 |
+| 10.2.2 | ATR Stop-Loss | +1-3% (MDD↓) | 1-2 gün | Düşük | Kaufman "Smarter Trading" |
+| 10.2.3 | Sector Rotation | +2-4% | 3-5 gün | Orta | Cohen & Polk 2009 |
+| 10.3.1 | HRP | MDD↓%10-20 | 1-2 gün | Düşük | López de Prado 2016 |
+| 10.3.2 | Hyperparameter | +1-3% | 2-3 gün | Düşük | Bergstra & Bengio 2012 |
+| 10.3.3 | Meta-Learning | +2-4% | 5-7 gün | Orta | Joulin-Lefèvre 2008 |
+| 10.3.4 | RL Genişletme | Marjinal | 5-7 gün | Yüksek | Pippas 2025 (RL trading) |
+
+---
+
+### 10.5 Önerilen Marathon Yol Haritası
+
+```
+v11 (mevcut)     OHLCV-only baseline                          → CAGR 5-10%, Sharpe 0.6
+   ↓
+v12  (Bölüm 1-9) Tier 1 veri zenginleştirme (FX, endeks, makro) → CAGR 15-20%, Sharpe 0.9-1.2
+   ↓
+v13              VIOP Beta Hedge + Kelly Sizing                → Sharpe 2× (CAGR aynı, vol↓)
+   ↓
+v14              ATR Stop-Loss + HRP + Hyperparameter Tuning   → MDD↓, Sharpe +%20
+   ↓
+v15              Long/Short (VIOP single-stock futures)        → CAGR 2×
+   ↓
+v16              Multi-frequency ensemble (haftalık + günlük)  → Sharpe +%30-50
+```
+
+**Kritik:** Her adım bir öncekinin ÜZERİNE eklenir. Compound etki bekleniyor.
+
+**Toplam hedef (v16'da):** Net CAGR %30-40, Sharpe 2.5-3.0, MDD <%10.
+
+Bu agresif hedeftir; gerçekçi konservatif tahmin **CAGR %20-25, Sharpe 1.8-2.2** civarında.
+
+---
+
+## 11. Sonuç ve Sonraki Adımlar
 
 **Önerilen sıra:**
 1. v11 marathon tamamlanmasını bekle (yarın sabaha kadar)
 2. v11 tam P&L analizi (10 yıl)
-3. Bu dokümanın Faz A-D'sini uygula (Tier 1 ekle)
+3. Bu dokümanın Faz A-D'sini uygula (Tier 1 veri ekle)
 4. v12 marathon Tier 1 ile çalıştır (~3-4 gün dev + 1 gece marathon)
-5. v12 sonucuna göre Tier 2 (fundamental) veya Tier 3 (sentiment/flow) eklenir
+5. v12 sonucuna göre Bölüm 10'daki strateji iyileştirmelerini sıraya koy
 
-**Toplam zaman tahmini:** Tier 1 entegrasyonu **5-7 gün** geliştirme + 1 gece marathon. Hedef: v11'in net %5-10 CAGR'sini v12'de net %15-20'ye çekmek.
+**Yakın vadeli prioritized backlog:**
+- v12: Tier 1 data (FX, endeks, makro) — Bölüm 1-9 (5-7 gün dev)
+- v13: VIOP Beta Hedge + Kelly Sizing — Bölüm 10.1.2 + 10.2.1 (3-4 gün dev)
+- v14: ATR Stop + HRP + Hyperparameter — Bölüm 10.2.2 + 10.3.1 + 10.3.2 (4-5 gün dev)
+
+**Toplam zaman tahmini (v12'ye kadar):** **5-7 gün** geliştirme + 1 gece marathon.
+**Toplam zaman tahmini (v14'e kadar):** ~3-4 hafta geliştirme + 3 gece marathon.
+
+**Final hedef:** v11'in net %5-10 CAGR'sini, kademeli olarak **v14'te net %20-25 CAGR, Sharpe 1.8-2.2**'ye çekmek.
