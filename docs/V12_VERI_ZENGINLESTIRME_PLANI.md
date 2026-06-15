@@ -672,3 +672,220 @@ Bu agresif hedeftir; gerçekçi konservatif tahmin **CAGR %20-25, Sharpe 1.8-2.2
 **Toplam zaman tahmini (v14'e kadar):** ~3-4 hafta geliştirme + 3 gece marathon.
 
 **Final hedef:** v11'in net %5-10 CAGR'sini, kademeli olarak **v14'te net %20-25 CAGR, Sharpe 1.8-2.2**'ye çekmek.
+
+---
+
+## 12. Veri Terminali Keşfi — Plan Revizyonu
+
+**KRİTİK GÜNCELLEMEsi:** `/Users/unalronikarakoyun/Desktop/Veri` altında çalışan bir veri terminali (Arkhimedes) sistemi keşfedildi. Bu sistem **Bölüm 1-9'da fetch edilmesi planlanan verilerin neredeyse tamamına** ve **fazlasına** sahip. Plan revize ediliyor: **fetch fazı (A) tamamen iptal**, sadece entegrasyon kalıyor.
+
+### 12.1 Mevcut Varlık Envanteri
+
+| Veri | Dosya (Veri Terminali) | Detay | v12 Plan'da Karşılığı |
+|---|---|---|---|
+| OHLCV + VWAP | `market_db.parquet` | 2016-2026, 1.13M satır, 8 kolon | Tier 0 (mevcut) |
+| **42-kolon fundamental** | `BIST_Tarihsel_Temel_Analiz.parquet` | F/K, PD/DD, FD/FAVÖK, ROE, ROA, Brüt Marj, Net Marj, Cari Oran, Net Borç, FAVÖK, Net Kar TTM, Satış TTM, Özkaynaklar, Toplam Varlıklar, Donen Varlıklar, Kısa V. Yükümlülükler vb. (56k satır) | **Tier 2.1 ✅** |
+| **TR Makro** | `EVDS_Verileri_2016_2026.xlsx` | TÜFE Genel, Yİ-ÜFE, Politika Faizi AÖFM (aylık, 126 satır) | **Tier 1.3 ✅** |
+| **15 hazır Custody feature** | `custody_features_db.parquet` | Yatırımcı sayısı momentum, kurumsal % trendi, retail capitulation, HHI değişim, breadth değişim, accumulator cost gap, AKD dominance, gross buy (581 hisse, 2022-2026) | **Tier 3 SUPER ✅** |
+| **Sector Map** | `sector_map.csv` | 611 hisse, 6 üst-sektör (SINAİ/MALİ/HİZMETLER/TEKNOLOJİ/DİĞER/MENKUL KIYM YO) | **Bölüm 5 ✅** |
+| **Delisted Tickers** | `delisted_tickers.txt` | 159 ticker | **Survivorship Bias FİX ✅** |
+| **Fiili Dolaşım** | `bist_fiili_dolasim_gunluk_2014_2026.csv` | Günlük 2014-2026, lot bazlı | **Likidite/Float feature ✅** |
+| **MKK Demografi** | `mkk_hisse_demografi_2014_2025.csv` | Yıllık yerli/yabancı × fon/tüzel/gerçek × değer_TL/yatırımcı_sayısı | **Tier 3 yabancı flow ✅** |
+| **67 hazır teknik feature** | `features_db.parquet` | (Aşağıda detay) | **Tier 1.1, 1.2, 1.4, 2.2 ✅** |
+| KAP Açıklamaları | `kap_disclosures.parquet` | 80k disclosure (sadece 2023!) | Tier 3 (kısıtlı) |
+| TEFAS Fon Akışı | `arkhimedes.duckdb` içinde | (incelenecek) | Tier 2.2 |
+| IPO Veritabanı | `ipo_database.json` | IPO event verisi | Bonus |
+| Knowledge Pools | `knowledge_success_pool.parquet` + `_failure_pool.parquet` + `_transitions.parquet` | Önceden bulunmuş başarılı/başarısız setup'lar | **Meta-learning için altın ✅** |
+
+### 12.2 features_db.parquet — 67 Hazır Feature Detayı
+
+Bu tek dosya v12 planımızdaki Tier 1.1-1.4 ve 2.2'nin **TAMAMINI** içeriyor:
+
+**Mevcut OHLCV (7):** `Pclose, Pvwap, Vlot, Phigh, Plow` + Ticker, Date
+
+**Momentum/Volatilite (12):** `mom_30, mom_60, mom_120, mom_252, vol_30, vol_60, vol_120, vol_252, cv_60, cv_120, cv_252, v_roc`
+
+**Teknik pozisyon (7):** `vwap_dist_avg, dist_52w_high, dist_52w_low, price_pos_20d, vwap_band_pos, pivot_dist, vol_mean_revert`
+
+**BIST 100 & Endeks (5):** ← Tier 1.2 ✅
+- `xu100_mom_60`, `xu100_mom_120` — endeks momentum
+- `xu100_above_ma200` — uzun-vade trend
+- `xu100_drawdown` — endeks risk durumu
+- `bm_vol_120` — benchmark volatilite
+
+**USD/TRY (3):** ← Tier 1.1 ✅
+- `usd_mom_30`, `usd_mom_60` — kur momentum
+- `usd_vol_30` — kur volatilitesi
+
+**Sektör Endeksleri (2):** ← Tier 1.2 ✅
+- `xbank_mom_60` — bankacılık momentum
+- `xusin_mom_60` — sanayi momentum
+
+**Göreceli Güç & Sektör (10):** ← Tier 2.3 (Sector Rotation) ✅
+- `rel_vol_120, cv_compression, rel_strength_60, rel_strength_120, mom_divergence`
+- `Sector, SuperSector` (kategorik)
+- `sector_mom_60, sector_mom_120, sector_vol_120`
+- `sector_rel_60, sector_rel_120` — sektör-rölatif performans
+
+**Fiili Dolaşım / Float (4):**
+- `float_lot_z_180d, float_lot_yoy_change, float_lot_mom_60, float_change_streak`
+
+**Custody/Yatırımcı (15):** ← Tier 3.1 yabancı/kurumsal akış ✅
+- `cust_invcount_mom_60, cust_invcount_accel` — yatırımcı sayısı dinamiği
+- `cust_inst_pct_trend_120, cust_inst_pct_accel` — kurumsal yüzde trendi
+- `cust_retail_capitulation` — perakende panik metriği
+- `cust_concentration, cust_entropy_now, cust_entropy_chg_60` — yoğunlaşma
+- `cust_hhi_chg_60, cust_top5_chg_60` — Herfindahl + top-5 değişim
+- `cust_breadth_chg_60` — yatırımcı genişliği
+- `cust_netcost_trend_60, cust_accumulator_costgap` — akümülatör analizi
+- `cust_akd_dominance_20` — AKD dominans
+- `cust_gross_buy_20` — gross buy
+
+**Mikroyapı (1):** `ats_z` — average trade size z-score ← Tier 2.2 ✅
+
+### 12.3 Revize Plan — Faz Listesi Güncel
+
+| Faz | Eski Durum | Yeni Durum | Açıklama |
+|---|---|---|---|
+| A. Veri Çekme | 1-2 gün | **İPTAL** | Veri zaten hazır |
+| B. Birleştirme | 1 gün | **0.5 gün** | Sadece path-bağlama + parquet merge |
+| C. Sektör Eşleme | 0.5 gün | **İPTAL** | `sector_map.csv` hazır (611 hisse) |
+| D. `alpha_cfg.py` | 0.5 gün | **1 gün** | 6 → ~50 feature (MCTS search space genişler) |
+| E. Fundamental | 2-3 gün | **0.5 gün** | 42 kolon hazır, sadece PIT discipline + merge |
+| F. Yabancı Akış | 2 gün | **0 gün** | Custody features hazır + MKK demografi |
+| G. v12 Marathon | 1 gece | 1 gece | Aynı |
+
+**Toplam revize tahmin:** 5-7 gün → **2-3 gün**
+
+### 12.4 Acil Yapılacaklar — 3 Gün İçin Plan
+
+#### Gün 1 — Veri Entegrasyonu
+1. `engine/data/external_data.py` yeni modül:
+   ```python
+   VERI_TERMINALI_PATH = "/Users/unalronikarakoyun/Desktop/Veri/data"
+
+   def load_features_db() -> pd.DataFrame:
+       """67 hazır feature'ı yükle."""
+       return pd.read_parquet(f"{VERI_TERMINALI_PATH}/features_db.parquet")
+
+   def load_fundamentals() -> pd.DataFrame:
+       """42 kolon fundamental, PIT-aware merge."""
+       df = pd.read_parquet(f"{VERI_TERMINALI_PATH}/BIST_Tarihsel_Temel_Analiz.parquet")
+       # Tarih kolonu HGDG_TARIH veya Tarih; period_end mantığı
+       return df
+
+   def load_macro() -> pd.DataFrame:
+       """TÜFE, ÜFE, Faiz — aylık, 1 ay PIT gecikme."""
+       df = pd.read_excel(f"{VERI_TERMINALI_PATH}/EVDS_Verileri_2016_2026.xlsx")
+       # as_of_date = açıklama tarihi (1 ay gecikme uygulanır)
+       return df
+
+   def load_sector_map() -> pd.DataFrame:
+       return pd.read_csv(f"{VERI_TERMINALI_PATH}/sector_map.csv")
+
+   def load_delisted() -> set:
+       """Survivorship bias için delisted ticker'lar."""
+       with open(f"{VERI_TERMINALI_PATH}/delisted_tickers.txt") as f:
+           return {line.strip().replace(".IS", "") for line in f}
+   ```
+
+2. PIT discipline kontrol — `BIST_Tarihsel_Temel_Analiz` içinde `period_end` ile `announce_date` ayrımı var mı? Yoksa konservatif 60 gün ekle.
+
+3. Survivorship bias düzeltmesi — `delisted_tickers` listesini market_db'de tutarak mining'e dahil et.
+
+#### Gün 2 — `alpha_cfg.py` Genişletme
+
+```python
+# OHLCV core (mevcut)
+FEATURES_OHLCV = ["Popen", "Phigh", "Plow", "Pclose", "Vlot", "Ptyp", "Pvwap"]
+
+# Momentum/Volatilite (features_db'den)
+FEATURES_MOM = ["mom_30", "mom_60", "mom_120", "mom_252",
+                "vol_30", "vol_60", "vol_120",
+                "cv_60", "cv_120", "v_roc"]
+
+# Teknik pozisyon
+FEATURES_TECH = ["vwap_dist_avg", "dist_52w_high", "dist_52w_low",
+                  "price_pos_20d", "vwap_band_pos", "vol_mean_revert"]
+
+# Endeks & FX (Tier 1)
+FEATURES_MARKET = ["xu100_mom_60", "xu100_mom_120", "xu100_drawdown",
+                    "usd_mom_30", "usd_mom_60", "usd_vol_30",
+                    "xbank_mom_60", "xusin_mom_60"]
+
+# Sektör (Tier 2.3)
+FEATURES_SECTOR = ["sector_mom_60", "sector_mom_120", "sector_vol_120",
+                    "sector_rel_60", "sector_rel_120", "rel_strength_60"]
+
+# Custody (Tier 3.1 — ÖZEL DEĞER)
+FEATURES_CUSTODY = ["cust_invcount_mom_60", "cust_inst_pct_trend_120",
+                     "cust_retail_capitulation", "cust_concentration",
+                     "cust_entropy_chg_60", "cust_breadth_chg_60",
+                     "cust_accumulator_costgap", "cust_akd_dominance_20"]
+
+# Fundamental (Tier 2.1 — PIT-aware!)
+FEATURES_FUND = ["F_K", "PD_DD", "FD_FAVOK", "ROE_pct", "ROA_pct",
+                  "Brut_Kar_Marji_pct", "Net_Kar_Marji_pct", "Cari_Oran",
+                  "Halka_Aciklik_Orani"]
+
+# Float
+FEATURES_FLOAT = ["float_lot_z_180d", "float_lot_yoy_change", "float_lot_mom_60"]
+
+FEATURES = (FEATURES_OHLCV + FEATURES_MOM + FEATURES_TECH +
+            FEATURES_MARKET + FEATURES_SECTOR +
+            FEATURES_CUSTODY + FEATURES_FUND + FEATURES_FLOAT)
+# Toplam: 6 → ~55 feature
+```
+
+**Önemli:** MCTS search space 55 feature ile **kuadratik patlar**. `n_trials` veya `num_gen`'i azaltmak gerekebilir. Optimal: `n_trials=30`, `num_gen=20` (eski 50, 30'dan düşür).
+
+#### Gün 3 — v12 Marathon Hazırlık + Smoke Test
+
+1. `scripts/run_historical_paper_trade.py` küçük güncelleme:
+   - `external_data.load_features_db()` çağrısı (mining öncesi)
+   - `enriched_market_db` üretimi → `data/enriched_market_db.parquet` cache
+
+2. Smoke test (3 ay paper trade, küçük örnek):
+   ```bash
+   venv/bin/python scripts/run_historical_paper_trade.py \
+       --trading-start 2018-01-01 --trading-end 2018-03-31 \
+       --workers 4 --n-trials 20 --use-enriched-features
+   ```
+
+3. v11 vs smoke test karşılaştırması — yeni feature'lar gerçekten katkı sağlıyor mu?
+
+### 12.5 Beklenen Etki Güncellemesi
+
+| Metrik | v11 (6 feature) | v12 (55 feature — VT entegrasyonu) | Açıklama |
+|---|---|---|---|
+| Unique formül kabul | 26 | 200-500 | Daha geniş feature space |
+| Mean RIC (top-1) | 0.012 | **0.025-0.045** | Custody + sektör-rölatif güçlü |
+| CAGR | %5-10 | **%20-30** | Çoklu alpha kaynakları compound |
+| Sharpe | 0.60 | **1.2-2.0** | Daha iyi risk-ayarlı getiri |
+| Max DD | %10 | **%6-9** | Sektör + custody hedge etkisi |
+
+Bu tahminler **eskisinden daha yukarı** çünkü:
+- 67 hazır feature, 6 orijinal feature'ın 10×'u
+- Custody features kompleks ve alfa açısından zengin (akümülatör cost gap, retail capitulation gibi metrikler akademide kanıtlanmış)
+- Fundamental 42 kolon (sadece P/E değil, FD/FAVÖK, ROE momentum, Net Marj trend dahil)
+
+### 12.6 Henüz Kullanılmayacaklar — v13 ve Sonrası İçin
+
+- `kap_disclosures.parquet` — sadece 2023 var, az veri. Önce KAP geçmiş 10 yılı doldurulmalı, sonra v13'te event-driven layer.
+- `knowledge_*_pool.parquet` — Arkhimedes'in başarılı setup havuzları. Bunlar meta-learning için altın (Bölüm 10.3.3) — v14'te değerlendirilecek.
+- `arkhimedes.duckdb` — TEFAS fon akışları içeriyor, henüz tam araştırılmadı. v13'te dahil edilebilir.
+- `mkk_hisse_demografi` — Yıllık frekans, marathon'un günlük cadence'ı için yeterli granular değil. Forward-fill ile feature olabilir ama düşük öncelik.
+
+### 12.7 Risk ve Dikkat Edilecekler
+
+1. **PIT discipline kritik:** `BIST_Tarihsel_Temel_Analiz` "as-reported" mu yoksa "restated" mı? Belirsiz. Konservatif: tarih + 60 gün gecikme uygula.
+
+2. **features_db.parquet 2017-05'te başlıyor:** v12 marathon başlangıcı bu tarihten önce olamaz. Aralık 2016 → Mayıs 2017 dönemi sadece market_db kullanır.
+
+3. **Custody features 2022-2026:** 2016-2021 dönemi için NaN. Mining NaN-aware olmalı, bu featuresleri eski dönemlerde devre dışı bırakmalı.
+
+4. **Schema farkı:** `market_db.parquet` (Veri Terminali) bizim olan ile aynı ama Pvwap kolonu fazladan var. Birleştirme kolay.
+
+5. **Veri yolu hardcoded — taşınabilirlik:** `VERI_TERMINALI_PATH` env var ile yapılmalı. Production deployment'a dikkat.
+
+---
