@@ -85,6 +85,7 @@ RL_AGENT_PATH    = ROOT_DIR / "data" / "rl_sizer.pt"
 PAPER_TRADES_PATH = ROOT_DIR / "data" / "historical_paper_trades.parquet"
 BENCHMARK_PATH    = ROOT_DIR / "data" / "bist100.parquet"
 MARKET_DB_PATH    = ROOT_DIR / "data" / "market_db.parquet"
+ENRICHED_DB_PATH  = ROOT_DIR / "data" / "enriched_market_db.parquet"
 
 INITIAL_CAPITAL  = 1_000_000.0   # 1M TL paper portföy
 
@@ -94,12 +95,21 @@ K_REGIMES_DEFAULT = 3   # HMM K — pre-trading mining sonrası dinamik güncell
 # ── Yardımcılar ───────────────────────────────────────────────────────────────
 
 def load_market_db(start: str) -> pd.DataFrame:
-    """market_db.parquet'i yükle ve `start` tarihinden itibaren filtrele."""
+    """Enriched DB varsa onu yükle (v12: 60+ feature), yoksa market_db (OHLCV-only)."""
+    if ENRICHED_DB_PATH.exists():
+        log.info("Enriched DB bulundu: %s", ENRICHED_DB_PATH.name)
+        db = pd.read_parquet(ENRICHED_DB_PATH)
+        db["Date"] = pd.to_datetime(db["Date"])
+        db = db[db["Date"] >= pd.Timestamp(start)].sort_values(["Ticker", "Date"]).reset_index(drop=True)
+        log.info("Enriched DB: %d satır × %d kolon (Date %s → %s)",
+                 len(db), db.shape[1], db["Date"].min().date(), db["Date"].max().date())
+        return db
     if not MARKET_DB_PATH.exists():
         raise FileNotFoundError(
             f"{MARKET_DB_PATH} bulunamadı. Önce çalıştır: "
             f"python scripts/fetch_bist_data.py --start {start}"
         )
+    log.warning("Enriched DB yok — OHLCV-only fallback (data/market_db.parquet)")
     db = pd.read_parquet(MARKET_DB_PATH)
     db["Date"] = pd.to_datetime(db["Date"])
     db = db[db["Date"] >= pd.Timestamp(start)].sort_values(["Ticker", "Date"]).reset_index(drop=True)

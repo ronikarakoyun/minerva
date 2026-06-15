@@ -64,7 +64,64 @@ def _paired_rolling(x: pd.Series, y: pd.Series, w: int, fn: str) -> pd.Series:
 
 class AlphaCFG:
     # -------- Tablo 4: özellikler --------
-    FEATURES = ["Popen", "Phigh", "Plow", "Pclose", "Vlot", "Ptyp"]
+    # v12: Veri Terminali entegrasyonu sonrası 7 → 60 feature
+    # Kategori-bazlı (test edilebilirlik + selektif aktivasyon)
+    FEATURES_OHLCV = ["Popen", "Phigh", "Plow", "Pclose", "Vlot", "Ptyp", "Pvwap"]
+
+    # Momentum / Volatilite (features_db'den)
+    FEATURES_MOM = [
+        "mom_30", "mom_60", "mom_120", "mom_252",
+        "vol_30", "vol_60", "vol_120",
+        "cv_60", "cv_120", "v_roc",
+    ]
+
+    # Teknik pozisyon (features_db'den)
+    FEATURES_TECH = [
+        "vwap_dist_avg", "dist_52w_high", "dist_52w_low",
+        "price_pos_20d", "vwap_band_pos", "vol_mean_revert",
+    ]
+
+    # Endeks & FX (Tier 1: BIST/USD/sektör endeks)
+    FEATURES_MARKET = [
+        "xu100_mom_60", "xu100_mom_120", "xu100_drawdown",
+        "usd_mom_30", "usd_mom_60", "usd_vol_30",
+        "xbank_mom_60", "xusin_mom_60", "bm_vol_120",
+    ]
+
+    # Sektör-rölatif (Tier 2.3: sector rotation)
+    FEATURES_SECTOR = [
+        "sector_mom_60", "sector_mom_120", "sector_vol_120",
+        "sector_rel_60", "sector_rel_120",
+        "rel_strength_60", "rel_strength_120", "mom_divergence",
+    ]
+
+    # Custody / yatırımcı (Tier 3: kurumsal % trendi, retail capitulation, HHI)
+    # NOT: 2022 öncesi NaN — formula doğal olarak filtrelenir.
+    FEATURES_CUSTODY = [
+        "cust_invcount_mom_60", "cust_inst_pct_trend_120",
+        "cust_retail_capitulation", "cust_concentration",
+        "cust_entropy_chg_60", "cust_breadth_chg_60",
+        "cust_accumulator_costgap", "cust_akd_dominance_20",
+        "cust_gross_buy_20",
+    ]
+
+    # Fundamental (Tier 2.1: F/K, PD/DD, ROE, FAVÖK marjı, …)
+    # NOT: PIT +60 gün gecikme uygulanır (build_enriched_db.py).
+    FEATURES_FUND = [
+        "F_K", "PD_DD", "FD_FAVOK", "ROE_pct", "ROA_pct",
+        "Brut_Kar_Marji_pct", "Net_Kar_Marji_pct", "Cari_Oran",
+    ]
+
+    # Float / fiili dolaşım (features_db'den)
+    FEATURES_FLOAT = [
+        "float_lot_z_180d", "float_lot_yoy_change", "float_lot_mom_60",
+    ]
+
+    FEATURES = (
+        FEATURES_OHLCV + FEATURES_MOM + FEATURES_TECH +
+        FEATURES_MARKET + FEATURES_SECTOR +
+        FEATURES_CUSTODY + FEATURES_FUND + FEATURES_FLOAT
+    )
 
     # -------- Tablo 5: sabitler ve pencereler --------
     CONSTANTS = [-0.1, -0.05, -0.01, 0.01, 0.05, 0.1]
@@ -229,6 +286,11 @@ class AlphaCFG:
 
     def _eval(self, n: Node, df: pd.DataFrame):
         if n.kind == "feature":
+            # v12: 60 feature listede ama DataFrame'de eksik olabilir (synthetic
+            # test verisi veya tarihsel kısıt). Eksik kolon → NaN serisi dön,
+            # formul doğal olarak sonraki filtrelerde elenir.
+            if n.op not in df.columns:
+                return pd.Series(np.nan, index=df.index)
             return df[n.op]
         if n.kind in ("constant", "num"):
             return float(n.op)

@@ -125,6 +125,12 @@ def run_mining_window(
     checkpoint_every: int = 50,
     resume: bool = False,
 ) -> list[MiningResult]:
+    # v12 SAFETY: AlphaCFG.FEATURES içinde DataFrame'de olmayan kolonlar varsa
+    # MCTS bunları rastgele seçince hep NaN üretir, hiç formül kabul edilmez.
+    # Mevcut kolonlarla restrict — instance attribute set ederek class default'u override.
+    _available = [f for f in cfg.FEATURES if f in db_window.columns]
+    if len(_available) < len(cfg.FEATURES):
+        cfg.FEATURES = _available
     """
     Bir train penceresi üzerinde tam mining döngüsü (Faz 1 + 2 + 3).
 
